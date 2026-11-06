@@ -11,6 +11,16 @@ BINANCE_REST_HOSTS = [
     "https://api3.binance.com"
 ]
 
+_CLIENTS: Dict[str, httpx.AsyncClient] = {}
+
+def get_client(proxy: Optional[str] = None) -> httpx.AsyncClient:
+    key = proxy or "default"
+    c = _CLIENTS.get(key)
+    if c is None or c.is_closed:
+        limits = httpx.Limits(max_keepalive_connections=30, max_connections=50, keepalive_expiry=120.0)
+        _CLIENTS[key] = httpx.AsyncClient(proxy=proxy if proxy else None, limits=limits, timeout=10.0)
+    return _CLIENTS[key]
+
 def to_number(x) -> Optional[float]:
     try:
         if x is None:
@@ -37,24 +47,24 @@ async def fetch_klines(symbol: str, interval: str, limit: int) -> List[Dict]:
         url = f"{host}/api/v3/klines"
         proxy = get_proxy_url_for(url)
         try:
-            async with httpx.AsyncClient(proxy=proxy if proxy else None, timeout=10.0) as client:
-                res = await client.get(url, params=params)
-                if res.status_code != 200:
-                    continue
-                data = res.json()
-                if not isinstance(data, list) or len(data) == 0:
-                    continue
-                klines = [{
-                    "openTime": int(k[0]),
-                    "open": to_number(k[1]),
-                    "high": to_number(k[2]),
-                    "low": to_number(k[3]),
-                    "close": to_number(k[4]),
-                    "volume": to_number(k[5]),
-                    "closeTime": int(k[6])
-                } for k in data if len(k) >= 7 and to_number(k[4]) is not None]
-                if len(klines) >= min(limit, 15):
-                    return klines
+            client = get_client(proxy)
+            res = await client.get(url, params=params)
+            if res.status_code != 200:
+                continue
+            data = res.json()
+            if not isinstance(data, list) or len(data) == 0:
+                continue
+            klines = [{
+                "openTime": int(k[0]),
+                "open": to_number(k[1]),
+                "high": to_number(k[2]),
+                "low": to_number(k[3]),
+                "close": to_number(k[4]),
+                "volume": to_number(k[5]),
+                "closeTime": int(k[6])
+            } for k in data if len(k) >= 7 and to_number(k[4]) is not None]
+            if len(klines) >= min(limit, 15):
+                return klines
         except Exception as e:
             last_err = e
             continue
@@ -76,13 +86,13 @@ async def fetch_last_price(symbol: str) -> Optional[float]:
         url = f"{host}/api/v3/ticker/price"
         proxy = get_proxy_url_for(url)
         try:
-            async with httpx.AsyncClient(proxy=proxy if proxy else None, timeout=8.0) as client:
-                res = await client.get(url, params=params)
-                if res.status_code == 200:
-                    data = res.json()
-                    p = to_number(data.get("price"))
-                    if p and p > 0:
-                        return p
+            client = get_client(proxy)
+            res = await client.get(url, params=params)
+            if res.status_code == 200:
+                data = res.json()
+                p = to_number(data.get("price"))
+                if p and p > 0:
+                    return p
         except Exception:
             continue
     return None
@@ -91,10 +101,10 @@ async def fetch_market_by_slug(slug: str) -> Optional[Dict]:
     url = f"{settings.GAMMA_BASE_URL}/markets"
     params = {"slug": slug}
     proxy = get_proxy_url_for(url)
-    async with httpx.AsyncClient(proxy=proxy if proxy else None, timeout=8.0) as client:
-        res = await client.get(url, params=params)
-        res.raise_for_status()
-        data = res.json()
+    client = get_client(proxy)
+    res = await client.get(url, params=params)
+    res.raise_for_status()
+    data = res.json()
     market = data[0] if isinstance(data, list) and data else data
     return market if isinstance(market, dict) and market.get("id") else None
 
@@ -102,10 +112,10 @@ async def fetch_live_events_by_series_id(series_id: str) -> List[Dict]:
     url = f"{settings.GAMMA_BASE_URL}/events"
     params = {"series_id": series_id, "closed": "false", "limit": 20}
     proxy = get_proxy_url_for(url)
-    async with httpx.AsyncClient(proxy=proxy if proxy else None, timeout=8.0) as client:
-        res = await client.get(url, params=params)
-        res.raise_for_status()
-        data = res.json()
+    client = get_client(proxy)
+    res = await client.get(url, params=params)
+    res.raise_for_status()
+    data = res.json()
     return data if isinstance(data, list) else []
 
 def flatten_event_markets(events: List[Dict]) -> List[Dict]:
@@ -123,11 +133,11 @@ async def fetch_clob_price(token_id: str, side: str = "buy") -> Optional[float]:
     params = {"token_id": token_id, "side": side}
     proxy = get_proxy_url_for(url)
     try:
-        async with httpx.AsyncClient(proxy=proxy if proxy else None, timeout=3.0) as client:
-            res = await client.get(url, params=params)
-            if res.status_code == 200:
-                data = res.json()
-                return to_number(data.get("price"))
+        client = get_client(proxy)
+        res = await client.get(url, params=params)
+        if res.status_code == 200:
+            data = res.json()
+            return to_number(data.get("price"))
     except Exception:
         pass
     return None
@@ -136,10 +146,10 @@ async def fetch_order_book(token_id: str) -> Dict:
     url = f"{settings.CLOB_BASE_URL}/book"
     params = {"token_id": token_id}
     proxy = get_proxy_url_for(url)
-    async with httpx.AsyncClient(proxy=proxy if proxy else None, timeout=10.0) as client:
-        res = await client.get(url, params=params)
-        res.raise_for_status()
-        return res.json()
+    client = get_client(proxy)
+    res = await client.get(url, params=params)
+    res.raise_for_status()
+    return res.json()
 
 def summarize_order_book(book: Dict) -> Dict:
     bids = book.get("bids", [])
@@ -193,10 +203,10 @@ async def fetch_available_15m_series() -> List[Dict]:
     proxy = get_proxy_url_for(url)
     events = []
     try:
-        async with httpx.AsyncClient(proxy=proxy if proxy else None, timeout=8.0) as client:
-            res = await client.get(url, params=params)
-            if res.status_code == 200:
-                events = res.json()
+        client = get_client(proxy)
+        res = await client.get(url, params=params)
+        if res.status_code == 200:
+            events = res.json()
     except Exception:
         events = []
 
@@ -227,7 +237,6 @@ async def fetch_available_15m_series() -> List[Dict]:
 
     return sorted(list(series_map.values()), key=lambda x: x["title"])
 
-
 def sweep_sell(bids: List[Dict], size: float) -> Optional[float]:
     """Calculate the effective VWAP sell price for `size` shares against order book bids.
     Returns None if book has 0 liquidity."""
@@ -254,4 +263,3 @@ def sweep_sell(bids: List[Dict], size: float) -> Optional[float]:
     if total_size <= 0:
         return None
     return total_val / total_size
-

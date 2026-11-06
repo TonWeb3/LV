@@ -17,15 +17,16 @@ class ChainlinkFetcher:
         self.preferred_rpc_url = None
 
     def get_ordered_rpcs(self):
+        alchemy = [settings.alchemy_rpc_url()] if settings.alchemy_rpc_url() else []
         from_list = settings.POLYGON_RPC_URLS
         single = [settings.POLYGON_RPC_URL] if settings.POLYGON_RPC_URL else []
         defaults = [
-            "https://polygon.drpc.org",
             "https://rpc.ankr.com/polygon",
             "https://1rpc.io/matic",
             "https://polygon.llamarpc.com"
         ]
-        all_rpcs = list(dict.fromkeys(from_list + single + defaults))
+        all_rpcs = list(dict.fromkeys(alchemy + from_list + single + defaults))
+        all_rpcs = [r for r in all_rpcs if "polygon.drpc.org" not in r]
         if self.preferred_rpc_url and self.preferred_rpc_url in all_rpcs:
             all_rpcs.remove(self.preferred_rpc_url)
             return [self.preferred_rpc_url] + all_rpcs

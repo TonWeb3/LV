@@ -41,7 +41,7 @@ _ws_clients = set()
 
 # ── Event-driven early entries & wakeups ───────────────────────────────────────
 MIN_EVAL_INTERVAL_S = 0.25  # Evaluates up to 4 times per second (from TOG-main)
-CTX_MAX_AGE_S = 4.0        # 4.0s context validity from TOG-main
+CTX_MAX_AGE_S = 10.0        # 4.0s context validity from TOG-main
 POLY_WS_MAX_AGE_MS = 2500
 MARK_CAPTURE_WINDOW_MS = 20_000
 
@@ -320,8 +320,8 @@ async def send_telegram(text: str):
         if not chat_id:
             continue
         try:
-            async with httpx.AsyncClient(proxy=proxy if proxy else None, timeout=5.0) as client:
-                await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
+            client = data.get_client(proxy)
+            await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
         except Exception as e:
             print(f"Failed to send telegram to {chat_id}: {e}")
 
@@ -444,7 +444,7 @@ polymarket_ws_stream = ws_data.PolymarketChainlinkStream(
     ws_url=settings.POLYMARKET_LIVE_DATA_WS_URL,
     symbol_includes=get_ws_symbol_filter(settings.SYMBOL)
 )
-polymarket_clob_ws = ws_data.PolymarketClobMarketStream()
+polymarket_clob_ws = ws_data.PolymarketClobMarketStream(on_update=_wake_entry)
 chainlink_ws_stream = ws_data.ChainlinkPriceStream(aggregator=settings.get_aggregator(settings.SYMBOL), on_update=_on_chainlink_tick)
 
 def get_candle_window_timing(window_minutes: int) -> Dict[str, float]:
@@ -480,7 +480,7 @@ async def get_active_market(force: bool = False) -> Optional[Dict[str, Any]]:
         if end_date:
             try:
                 end_ts = datetime.fromisoformat(end_date.replace('Z', '+00:00')).timestamp()
-                if end_ts > now + 15 and (now - _cached_market_ts) < 30.0:
+                if end_ts > now + 15:
                     return _cached_market
             except Exception:
                 pass
@@ -707,7 +707,7 @@ async def handle_order_gone_quiet(order_id: str, trade: Dict[str, Any], token_id
                 new_stake = (float(settings.RISK_VALUE) / 100.0) * new_bal
             state["precomputed_live_stake"] = round(max(1.0, min(new_stake, new_bal)) if new_bal >= 1.0 else 0.0, 2)
 
-        save_state()
+        await asyncio.to_thread(save_state)
         _sync_active_trades_to_latest_data()
         await broadcast_state()
 
@@ -719,7 +719,7 @@ async def handle_order_gone_quiet(order_id: str, trade: Dict[str, Any], token_id
     else:
         log_message(f"{otype} order {order_id} confirmed cancelled on exchange, no fill")
         trade["live_status"] = "CANCELLED"
-        save_state()
+        await asyncio.to_thread(save_state)
         _sync_active_trades_to_latest_data()
         await broadcast_state()
         return False
@@ -861,7 +861,7 @@ async def _continuous_live_copy_fill(trade: Dict[str, Any], market: Dict[str, An
                 trade["live_limit_price"] = gtd_price
                 trade["live_quoted_price"] = current_ask
                 trade["live_expiration"] = expiration
-                save_state()
+                await asyncio.to_thread(save_state)
                 _sync_active_trades_to_latest_data()
                 await broadcast_state()
                 log_message(f"LIVE GTD limit order placed for {side}: {gtd_shares:.2f} shares @ {gtd_price:.4f} (order {order_id}) — resting on book")
@@ -874,7 +874,7 @@ async def _continuous_live_copy_fill(trade: Dict[str, Any], market: Dict[str, An
                         filled = await handle_order_gone_quiet(order_id, trade, token_id, current_ask, gtd_price, "GTD")
                         if not filled:
                             trade["live_status"] = "TIMEOUT"
-                            save_state()
+                            await asyncio.to_thread(save_state)
                             _sync_active_trades_to_latest_data()
                             await broadcast_state()
                         return
@@ -915,7 +915,7 @@ async def _continuous_live_copy_fill(trade: Dict[str, Any], market: Dict[str, An
                                 new_stake = (float(settings.RISK_VALUE) / 100.0) * new_bal
                             state["precomputed_live_stake"] = round(max(1.0, min(new_stake, new_bal)) if new_bal >= 1.0 else 0.0, 2)
 
-                        save_state()
+                        await asyncio.to_thread(save_state)
                         _sync_active_trades_to_latest_data()
                         await broadcast_state()
 
@@ -930,7 +930,7 @@ async def _continuous_live_copy_fill(trade: Dict[str, Any], market: Dict[str, An
                     if matched > 0 and matched != trade.get("live_shares"):
                         trade["live_shares"] = matched
                         trade["live_entry_price"] = float(ord_status.get("price") or gtd_price)
-                        save_state()
+                        await asyncio.to_thread(save_state)
                         _sync_active_trades_to_latest_data()
                         await broadcast_state()
 
@@ -968,7 +968,7 @@ async def _continuous_live_copy_fill(trade: Dict[str, Any], market: Dict[str, An
                         else:
                             log_message(f"GTD order {order_id} cancelled on exchange after max attempts ({max_attempts}) — stopping order placement for this window to prevent duplicate entry.")
                             trade["live_status"] = "CANCELLED"
-                            save_state()
+                            await asyncio.to_thread(save_state)
                             _sync_active_trades_to_latest_data()
                             await broadcast_state()
                             return
@@ -982,7 +982,7 @@ async def _continuous_live_copy_fill(trade: Dict[str, Any], market: Dict[str, An
                 if any(k in err for k in ("setup_failed", "client_not_ready", "invalid_private_key", "not enough balance", "balance is not enough")):
                     trade["live_status"] = "FAILED"
                     log_message(f"LIVE copy aborted: {err}")
-                    save_state()
+                    await asyncio.to_thread(save_state)
                     _sync_active_trades_to_latest_data()
                     await broadcast_state()
                     return
@@ -1249,7 +1249,7 @@ async def maybe_flip_position(decision: Dict[str, Any], poly_snapshot: Dict[str,
     state["trade_history"].append(_archive(trade))
     state["active_trades"] = [t for t in state["active_trades"] if t is not trade]
     state["last_trade_side"] = None
-    save_state()
+    await asyncio.to_thread(save_state)
     _sync_active_trades_to_latest_data()
     log_message(f"FLIP: Closed {trade['side']} @ {exit_price:.2f} (Paper P/L ${trade['paper_profit_loss']:.2f}); opening {new_side}")
     return new_side
@@ -1412,7 +1412,7 @@ async def update_trades(current_prices: Dict[str, Any]):
                         new_stake = (float(settings.RISK_VALUE) / 100.0) * new_bal
                     state["precomputed_live_stake"] = round(max(1.0, min(new_stake, new_bal)) if new_bal >= 1.0 else 0.0, 2)
 
-                save_state()
+                await asyncio.to_thread(save_state)
                 _sync_active_trades_to_latest_data()
                 await broadcast_state()
                 trades_changed = True
@@ -1570,7 +1570,7 @@ async def update_trades(current_prices: Dict[str, Any]):
 
     state["active_trades"] = remaining_active
     if trades_changed:
-        save_state()
+        await asyncio.to_thread(save_state)
         _sync_active_trades_to_latest_data()
         # Controlled GC invocation: cleanup expired trade objects during quiet settlement period
         import gc
@@ -1899,17 +1899,20 @@ async def update_loop():
             poly_ws = polymarket_ws_stream.get_last()
             cl_ws = chainlink_ws_stream.get_last()
 
+            cl_cand = cl_ws.get("price") if cl_ws and cl_ws.get("price") else state.get("last_chainlink_price")
+            need_rest_chainlink = cl_cand is None
+
             spot_cand = binance_ws.get("price") if binance_ws and binance_ws.get("price") else state.get("last_spot_price")
             need_rest_spot = spot_cand is None
             results = await asyncio.gather(
                 data.fetch_last_price(settings.SYMBOL) if need_rest_spot else asyncio.sleep(0, result=None),
-                chainlink.chainlink_fetcher.fetch_chainlink_btc_usd(),
+                chainlink.chainlink_fetcher.fetch_chainlink_btc_usd() if need_rest_chainlink else asyncio.sleep(0, result=None),
                 fetch_polymarket_snapshot(),
                 return_exceptions=True
             )
 
             last_price = results[0] if not isinstance(results[0], Exception) else None
-            chainlink_data = results[1] if not isinstance(results[1], Exception) else {}
+            chainlink_data = results[1] if not isinstance(results[1], Exception) and results[1] else {}
             poly_snapshot = results[2] if not isinstance(results[2], Exception) else {"ok": False}
 
             klines_1m = binance_kline_1m.get_candles()
@@ -2279,6 +2282,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(polymarket_clob_ws.start()),
         asyncio.create_task(chainlink_ws_stream.start()),
         asyncio.create_task(update_loop()),
+        asyncio.create_task(live_balance_updater()),
         asyncio.create_task(telegram_poller()),
         asyncio.create_task(entry_watcher())
     ]
@@ -2290,6 +2294,16 @@ async def lifespan(app: FastAPI):
         async def _warm_live():
             try:
                 await asyncio.to_thread(clob_trader.ensure_ready)
+                bal = await asyncio.to_thread(clob_trader.get_usdc_balance)
+                if bal is not None and bal >= 0:
+                    state["live_balance"] = bal
+                    risk_type = (settings.RISK_TYPE or "percent").lower()
+                    if risk_type == "fixed":
+                        stake = float(settings.RISK_VALUE)
+                    else:
+                        stake = (float(settings.RISK_VALUE) / 100.0) * bal
+                    state["precomputed_live_stake"] = round(max(1.0, min(stake, bal)) if bal >= 1.0 else 0.0, 2)
+                    log_message(f"Live balance pre-warmed: ${bal:.2f} (stake: ${state['precomputed_live_stake']:.2f})")
                 if settings.RELAYER_API_KEY:
                     try:
                         setup_res = await asyncio.to_thread(clob_trader.ensure_setup)
@@ -2948,5 +2962,5 @@ async def get_history():
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8010))
+    port = int(os.getenv("PORT", 8050))
     uvicorn.run(app, host="0.0.0.0", port=port)

@@ -357,7 +357,8 @@ class PolymarketChainlinkStream:
 
 class PolymarketClobMarketStream:
     """Real-time orderbook and price feed for active Polymarket tokens over CLOB Market WS."""
-    def __init__(self, ws_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"):
+    def __init__(self, ws_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market", on_update=None):
+        self.on_update = on_update
         self.ws_url = ws_url
         self.asset_ids: List[str] = []
         self.books: Dict[str, Dict] = {} # asset_id -> {"bids": [...], "asks": [...], "best_bid": float, "best_ask": float}

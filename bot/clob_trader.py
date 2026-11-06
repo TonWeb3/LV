@@ -403,6 +403,9 @@ class ClobTrader:
             st, addr = item[0], item[1]
             pusd_bal, usdc_e_bal = self._get_onchain_balances(gasless, addr)
             total_bal = max(pusd_bal, usdc_e_bal)
+            if total_bal > 0:
+                # Immediate early exit on first funded wallet (eliminates 10+ redundant RPC calls)
+                return st, addr
             if best is None or total_bal > best[2]:
                 best = (st, addr, total_bal)
 
