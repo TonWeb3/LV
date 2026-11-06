@@ -2962,5 +2962,5 @@ async def get_history():
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8050))
+    port = int(os.getenv("PORT", 8020))
     uvicorn.run(app, host="0.0.0.0", port=port)
