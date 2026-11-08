@@ -94,9 +94,6 @@ def _slot_keys(market: Dict[str, Any], kind: str = "regular") -> List[str]:
 
 
 def _model_steps(minutes_left: float):
-    """Model clock for the regular strategy (settings model.time_mode)."""
-    if settings.MODEL_TIME_MODE == "exact":
-        return max(float(minutes_left) * 60.0, 0.5) / 300.0
     return max(1, math.ceil(minutes_left / 5))
 
 def _sync_active_trades_to_latest_data():
@@ -1855,24 +1852,14 @@ async def update_trades(current_prices: Dict[str, Any]):
 
         winning_index = -1
         resolution = None
-        # PATCH: longshot — settlement.mode "official" only accepts Polymarket's resolved result
-        # (price >= official_min_price, and closed if official_require_closed); "price" is the
-        # original rule (any outcome price above price_threshold, default 0.9).
-        official = settings.SETTLEMENT_MODE == "official"
         for i, p in enumerate(outcome_prices):
             try:
-                fp = float(p)
-            except Exception:
-                continue
-            if official:
-                if fp >= settings.OFFICIAL_MIN_PRICE and (market_closed or not settings.OFFICIAL_REQUIRE_CLOSED):
+                if float(p) > 0.9:
                     winning_index = i
-                    resolution = "polymarket_official"
+                    resolution = "polymarket_settled"
                     break
-            elif fp > settings.PRICE_SETTLE_THRESHOLD:
-                winning_index = i
-                resolution = "polymarket_settled"
-                break
+            except Exception:
+                pass
 
         strike = trade.get("strike_price")
         settlement_price = (trade.get("close_price") or trade.get("settlement_price_at_expiry")
@@ -1882,23 +1869,11 @@ async def update_trades(current_prices: Dict[str, Any]):
                 trade["expired_at"] = now_ts
             waited = now_ts - trade["expired_at"]
 
-            if waited < (settings.OFFICIAL_SETTLE_WAIT_S if official else settings.AUTHORITATIVE_SETTLE_WAIT_S):
+            if waited < settings.AUTHORITATIVE_SETTLE_WAIT_S:
                 remaining_active.append(trade)
                 continue
 
-            # PATCH: longshot — fallback on the bot's own 60-second averages (closing >= opening = Up)
-            if official and settings.SETTLEMENT_FALLBACK == "sampled_twap":
-                close_avg = trade.get("sampled_close_avg")
-                open_avg = trade.get("sampled_open_avg") or strike
-                if close_avg and open_avg:
-                    winning_index = up_index if close_avg >= open_avg else down_index
-                    resolution = "sampled_twap"
-                    trade["settlement_price_at_expiry"] = close_avg
-                    trade["settle_wait_s"] = round(waited, 1)
-                    log_message(f"SETTLEMENT FALLBACK for {trade['market_slug']}: no official result after {waited:.0f}s — "
-                                f"resolved locally on the bot's 60-second averages ({close_avg:.2f} vs {open_avg:.2f})")
-
-            if winning_index == -1 and strike and settlement_price:
+            if strike and settlement_price:
                 trade["settlement_price_at_expiry"] = settlement_price
                 winning_index = up_index if settlement_price > strike else down_index
                 resolution = "close_vs_open"
@@ -2177,9 +2152,7 @@ async def evaluate_entry(reason: str = "event"):
         if not spot_price:
             return
 
-        # PATCH: longshot — model.time_mode ("steps" = original whole 5-minute steps)
-        mc_steps = _model_steps(max(0.0, (ctx.get("end_ts") or now) - now) / 60.0
-                                if settings.MODEL_TIME_MODE == "exact" else ctx["time_left_min"])
+        mc_steps = _model_steps(ctx["time_left_min"])
         fair_up = indicators.fair_prob_up(
             spot_price, ctx["target_open"], mc_steps, ctx["sigma_5m"], drift_per_step=ctx["drift_5m"]
         )
@@ -2934,8 +2907,7 @@ async def lifespan(app: FastAPI):
 
 
     tasks.append(asyncio.create_task(ls_maker_mgr.run_forever()))  # PATCH: longshot maker
-    log_message("LONGSHOT: on — " + longshot.describe(settings.LONGSHOT)
-                + f" | settlement: {settings.SETTLEMENT_MODE} | model clock: {settings.MODEL_TIME_MODE}")
+    log_message("LONGSHOT: on — " + longshot.describe(settings.LONGSHOT))
 
 
     # Pre-warm CLOB trader client & on-chain verification in background thread if private key set
@@ -3255,15 +3227,8 @@ async def get_settings():
         # PATCH: longshot
         "longshot": settings.LONGSHOT,
         "settlement": {
-            "mode": settings.SETTLEMENT_MODE,
-            "official_wait_s": settings.OFFICIAL_SETTLE_WAIT_S,
-            "official_min_price": settings.OFFICIAL_MIN_PRICE,
-            "official_require_closed": settings.OFFICIAL_REQUIRE_CLOSED,
-            "fallback": settings.SETTLEMENT_FALLBACK,
-            "price_threshold": settings.PRICE_SETTLE_THRESHOLD,
             "authoritative_settle_wait_s": settings.AUTHORITATIVE_SETTLE_WAIT_S,
         },
-        "model": {"time_mode": settings.MODEL_TIME_MODE},
     }
 
 @app.post("/api/settings")
@@ -3281,10 +3246,6 @@ async def post_settings(new_settings: Dict[str, Any]):
         lv_in["order_signer"] = v
         _new_signer = v
 
-    # PATCH: longshot — check the long-shot / settlement / model / sweep sections before
-    # anything is written; a bad value returns an error and changes nothing.
-    from bot.config import normalize_settlement, apply_settlement
-
     def _merge_into(base, override):
         out = json.loads(json.dumps(base))
         for k, v in (override or {}).items():
@@ -3294,21 +3255,13 @@ async def post_settings(new_settings: Dict[str, Any]):
                 out[k] = v
         return out
 
-    new_ls = new_st = new_tm = None
+    new_ls = None
     try:
-        for _sec in ("longshot", "settlement", "model"):
-            if _sec in new_settings and not isinstance(new_settings[_sec], dict):
-                raise ValueError(f"{_sec} must be an object")
-        if isinstance(new_settings.get("longshot"), dict):
+        if "longshot" in new_settings:
+            if not isinstance(new_settings["longshot"], dict):
+                raise ValueError("longshot must be an object")
             new_ls = longshot.normalize(_merge_into(settings.LONGSHOT, new_settings["longshot"]))
             new_settings["longshot"] = new_ls
-        if isinstance(new_settings.get("settlement"), dict):
-            new_st = normalize_settlement(new_settings["settlement"])
-            new_settings["settlement"] = {**new_settings["settlement"], **new_st}
-        if isinstance(new_settings.get("model"), dict) and "time_mode" in new_settings["model"]:
-            new_tm = new_settings["model"]["time_mode"]
-            if new_tm not in ("steps", "exact"):
-                raise ValueError("model.time_mode must be steps or exact")
     except ValueError as e:
         return {"status": "error", "error": f"invalid_settings: {e}"}
 
@@ -3407,10 +3360,9 @@ async def post_settings(new_settings: Dict[str, Any]):
     if new_ls is not None:
         settings.LONGSHOT = new_ls
         log_message("LONGSHOT: on — " + longshot.describe(new_ls))
-    if new_st is not None:
-        apply_settlement(settings, new_st)
-    if new_tm is not None:
-        settings.MODEL_TIME_MODE = new_tm
+    if "settlement" in new_settings and isinstance(new_settings["settlement"], dict):
+        if "authoritative_settle_wait_s" in new_settings["settlement"]:
+            settings.AUTHORITATIVE_SETTLE_WAIT_S = float(new_settings["settlement"]["authoritative_settle_wait_s"])
 
     ct = merged_cfg.get("copy_trader", {})
     if ct:
@@ -3698,5 +3650,5 @@ async def get_history():
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8064))
+    port = int(os.getenv("PORT", 8050))
     uvicorn.run(app, host="0.0.0.0", port=port)
