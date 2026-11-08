@@ -1,7 +1,7 @@
 import os
 import json
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import List, Dict
+from typing import List, Dict, Any, Optional, Tuple
 
 CONFIG_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "config.json"))
 
@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     # ── Copy-trader continuous GTD execution ───────────────────────────────────
     COPY_RETRY_INTERVAL_MS: int = 300
     COPY_MAX_RETRIES: int = 5
+    COPY_RESTING_TIMEOUT_S: float = 2.0
 
     # ── Live trading (Polymarket CLOB V2) ───────────────────────────────────────
     # The wallet is DERIVED from PRIVATE_KEY (hex key or 12/24-word seed phrase) and
@@ -108,6 +109,10 @@ class Settings(BaseSettings):
         return self.CHAINLINK_AGGREGATORS.get(s, self.CHAINLINK_BTC_USD_AGGREGATOR)
 
     # Proxy
+    # ── Long shots & automated redeem sweep ───────────────────────────────────────
+    LONGSHOT: Dict[str, Any] = {}
+    REDEEM_SWEEP: Dict[str, Any] = {}
+
     HTTP_PROXY: str = os.getenv("HTTP_PROXY", os.getenv("http_proxy", ""))
     HTTPS_PROXY: str = os.getenv("HTTPS_PROXY", os.getenv("https_proxy", ""))
     ALL_PROXY: str = os.getenv("ALL_PROXY", os.getenv("all_proxy", ""))
@@ -142,6 +147,14 @@ def normalize_private_key(secret: str) -> str:
 
 def load_settings():
     base_settings = Settings()
+    try:
+        from bot import longshot as _longshot
+        from bot import redeem_sweep as _redeem_sweep
+        base_settings.LONGSHOT = _longshot.merged({})
+        base_settings.REDEEM_SWEEP = _redeem_sweep.merged({})
+    except Exception:
+        base_settings.LONGSHOT = {}
+        base_settings.REDEEM_SWEEP = {}
     config_path = CONFIG_PATH if os.path.exists(CONFIG_PATH) else "config.json"
     if os.path.exists(config_path):
         try:
@@ -161,6 +174,7 @@ def load_settings():
                 ct = config_data["copy_trader"]
                 if "retry_interval_ms" in ct: base_settings.COPY_RETRY_INTERVAL_MS = int(ct["retry_interval_ms"])
                 if "max_retries" in ct: base_settings.COPY_MAX_RETRIES = int(ct["max_retries"])
+                if "resting_timeout_s" in ct: base_settings.COPY_RESTING_TIMEOUT_S = float(ct["resting_timeout_s"])
 
             if "relayer" in config_data:
                 rl = config_data["relayer"]
@@ -230,6 +244,20 @@ def load_settings():
                 if "polygon_wss_url" in cl: base_settings.POLYGON_WSS_URL = cl["polygon_wss_url"]
                 if "btc_usd_aggregator" in cl: base_settings.CHAINLINK_BTC_USD_AGGREGATOR = cl["btc_usd_aggregator"]
                 if "alchemy_api_key" in cl: base_settings.ALCHEMY_API_KEY = cl["alchemy_api_key"]
+
+            if "longshot" in config_data:
+                try:
+                    from bot import longshot as _longshot
+                    base_settings.LONGSHOT = _longshot.normalize(config_data["longshot"])
+                except Exception as e:
+                    print(f"Warning: Failed to load longshot config: {e}")
+
+            if "redeem_sweep" in config_data:
+                try:
+                    from bot import redeem_sweep as _redeem_sweep
+                    base_settings.REDEEM_SWEEP = _redeem_sweep.normalize(config_data["redeem_sweep"])
+                except Exception as e:
+                    print(f"Warning: Failed to load redeem_sweep config: {e}")
 
             # Legacy flat keys fallback
             if "auto_withdraw_enabled" in config_data and "capital_extractor" not in config_data:

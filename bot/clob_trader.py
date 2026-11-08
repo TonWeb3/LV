@@ -17,9 +17,10 @@ by hand any more.
 All clients are synchronous — call from the event loop via `asyncio.to_thread`.
 """
 
+import sys
 import threading
-import time
 from datetime import datetime
+import time
 from typing import Optional, Dict, Any, List, Tuple
 from .config import settings
 
@@ -136,46 +137,111 @@ _patch_order_builder()
 _patch_crypto_signing()
 
 
-_CACHED_RUST_MOD = None
-
-
 def _ensure_rust_clob():
-    """Return the cached native Rust `rust_clob` extension module.
-    Cached in RAM after first import — executes in sub-microsecond time with zero filesystem I/O."""
-    global _CACHED_RUST_MOD
-    if _CACHED_RUST_MOD is not None:
-        return _CACHED_RUST_MOD
+    """Ensure the native Rust `rust_clob` extension is compiled and imported for the
+    current OS/CPU architecture. If not yet installed or if source files were modified,
+    automatically rebuilds `./rust_clob` via pip."""
+    import os
+    import sys
+    import shutil
+    import subprocess
+    import importlib
+
+    proj_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    crate_dir = os.path.join(proj_root, "rust_clob")
+    src_file = os.path.join(crate_dir, "src", "lib.rs")
+    cargo_file = os.path.join(crate_dir, "Cargo.toml")
+
+    rebuild_needed = False
     try:
         import rust_clob
-        _CACHED_RUST_MOD = rust_clob
-        return _CACHED_RUST_MOD
-    except Exception as e:
-        raise RuntimeError(f"rust_clob native module not available: {e}")
+        mod_file = getattr(rust_clob, "__file__", None)
+        if mod_file and os.path.exists(mod_file):
+            bin_mtime = os.path.getmtime(mod_file)
+            src_dir = os.path.dirname(src_file)
+            watched = [cargo_file] + ([os.path.join(src_dir, f) for f in os.listdir(src_dir) if f.endswith(".rs")]
+                                      if os.path.isdir(src_dir) else [src_file])
+            for src_p in watched:
+                if os.path.exists(src_p) and os.path.getmtime(src_p) > bin_mtime:
+                    rebuild_needed = True
+                    break
+        if not rebuild_needed:
+            return rust_clob
+    except ImportError:
+        rebuild_needed = True
+
+    if not os.path.isdir(crate_dir):
+        raise RuntimeError(f"Missing rust_clob crate directory at {crate_dir}")
+
+    env = os.environ.copy()
+    cargo_bin = os.path.expanduser("~/.cargo/bin")
+    if os.path.isdir(cargo_bin) and cargo_bin not in env.get("PATH", ""):
+        env["PATH"] = f"{cargo_bin}{os.pathsep}{env.get('PATH', '')}"
+
+    if not shutil.which("cargo", path=env.get("PATH")):
+        if os.name != "nt":
+            print("[rust_clob] Rust toolchain not found — installing rustup automatically...")
+            subprocess.run(
+                "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal",
+                shell=True,
+                check=True,
+                env=env,
+            )
+            env["PATH"] = f"{cargo_bin}{os.pathsep}{env.get('PATH', '')}"
+        else:
+            raise RuntimeError("Rust toolchain (cargo) not found in PATH.")
+
+    print(f"[rust_clob] Compiling/reinstalling native Rust extension from {crate_dir} ...")
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--no-deps", "--force-reinstall", crate_dir],
+        check=True,
+        env=env,
+    )
+    if "rust_clob" in sys.modules:
+        import rust_clob
+        return importlib.reload(rust_clob)
+    import rust_clob
+    return rust_clob
+
+
+DEPOSIT_WALLET_FACTORY = "0x00000000000Fb5C9ADea0298D729A0CB3823Cc07"
+DEPOSIT_WALLET_BEACON = "0x7A18EDfe055488A3128f01F563e5B479D92ffc3a"
 
 
 def derive_beacon_deposit_wallet(eoa_address: str) -> str:
-    """Derive deterministic ERC-1967 Beacon Proxy deposit wallet address
-    introduced in Polymarket's June 29, 2026 upgrade.
-    Uses CREATE2 with Solady LibClone initCodeHashERC1967BeaconProxy."""
-    from eth_utils import keccak, to_checksum_address, to_bytes
-    from eth_abi import encode
+    """Deposit wallet of an account whose wallet was deployed after Polymarket's
+    June 29, 2026 upgrade (ERC-1967 beacon proxy). Formula from
+    docs.polymarket.com/trading/deposit-wallets:
 
-    owner = to_checksum_address(eoa_address)
-    factory = to_checksum_address("0x00000000000Fb5C9ADea0298D729A0CB3823Cc07")
-    beacon = to_checksum_address("0x7A18EDfe055488A3128f01F563e5B479D92ffc3a")
+        walletId = bytes32(owner)                 # owner = the EOA, left-padded
+        args     = abi.encode(factory, walletId)
+        salt     = keccak256(args)
+        wallet   = CREATE2(factory, salt, LibClone.initCodeHashERC1967BeaconProxy(beacon, args))
 
-    owner_b32 = to_bytes(hexstr=owner).rjust(32, b"\x00")
-    args = encode(["address", "bytes32"], [factory, owner_b32])
+    The init code includes `args` (Solady's beacon proxy *with* args). The previous
+    version hashed the init code without args and returned a different address.
+    Checked against real deposit wallets (accounts in the bot's own logs)."""
+    from eth_utils import keccak, to_checksum_address
+
+    factory = bytes.fromhex(DEPOSIT_WALLET_FACTORY[2:])
+    beacon = bytes.fromhex(DEPOSIT_WALLET_BEACON[2:])
+    owner = bytes.fromhex(to_checksum_address(eoa_address)[2:])
+    args = factory.rjust(32, b"\x00") + owner.rjust(32, b"\x00")
+    init_code = (
+        (0x6100523D8160233D3973 + (len(args) << 56)).to_bytes(10, "big")
+        + beacon
+        + bytes.fromhex("60195155f3363d3d373d3d363d602036600436635c60da")
+        + bytes.fromhex("1b60e01b36527fa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6c")
+        + bytes.fromhex("b3582b35133d50545afa5036515af43d6000803e604d573d6000fd5b3d6000f3")
+        + args
+    )
     salt = keccak(args)
+    return to_checksum_address(keccak(b"\xff" + factory + salt + keccak(init_code))[12:])
 
-    prefix = bytes.fromhex("60523d8160223d3973")
-    beacon_b20 = to_bytes(hexstr=beacon)
-    suffix = bytes.fromhex("60195155f3363d3d373d3d363d602036600436635c60da1b60e01b36527fa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50545afa5036515af43d6000803e604d573d6000fd5b3d6000f3")
-    bytecode_hash = keccak(prefix + beacon_b20 + suffix)
 
-    create2_input = b"\xff" + to_bytes(hexstr=factory) + salt + bytecode_hash
-    derived_bytes = keccak(create2_input)[12:]
-    return to_checksum_address(derived_bytes)
+def _is_signer_key_error(text: Any) -> bool:
+    t = str(text or "").lower()
+    return "order signer address" in t and "api key" in t
 
 
 class ClobTrader:
@@ -195,7 +261,29 @@ class ClobTrader:
         self._approvals_done = False
         self._api_creds = None
         self._rust_ready = False
+        self._cached_balance = None
+        self._last_balance_ts = 0.0
+        self._balance_fetching = False
         self._lock = threading.Lock()
+        self.wallet_source: str = ""           # "configured" or how auto-detect found the wallet
+        self._signer_mode: str = ""            # type-3 order signer in the Rust state: "wallet" | "eoa"
+        self._signer_ok: Optional[Tuple[str, str, str]] = None  # (eoa, wallet, mode) Polymarket accepted
+        self._rust_can_switch = False          # rust_clob built from the new lib.rs
+        self._log_hook = None
+
+    # ── logging into the app log (main.py registers log_message) ────────────────
+    def set_log_hook(self, fn):
+        self._log_hook = fn
+
+    def _log(self, msg: str):
+        fn = self._log_hook
+        if fn is not None:
+            try:
+                fn(msg)
+                return
+            except Exception:
+                pass
+        print(msg)
 
     def reset(self):
         """Drop cached clients so the next call re-initialises with fresh
@@ -210,6 +298,13 @@ class ClobTrader:
             self._approvals_done = False
             self._api_creds = None
             self._rust_ready = False
+            self._cached_balance = None
+            self._last_balance_ts = 0.0
+            self._balance_fetching = False
+            self.wallet_source = ""
+            self._signer_mode = ""
+            self._rust_can_switch = False
+            # _signer_ok is kept: it's tied to (EOA, wallet) and only reused for the same pair
     # ── wallet derivation / detection ───────────────────────────────────────────
     def _derive_creds(self):
         """CLOB API creds derived from the key (L1 auth). Cached. Doubles as the
@@ -280,172 +375,144 @@ class ClobTrader:
             usdc_e_bal = 0.0
         return pusd_bal, usdc_e_bal
 
+    def _configured_wallet(self, gasless=None) -> Optional[Tuple[int, str]]:
+        """(signature_type, address) from Settings → "Funder / Deposit Wallet Address",
+        or None when blank. Treated as a deposit wallet (type 3) unless it is the EOA
+        itself (type 0) or its on-chain code is a Polymarket proxy (1) or Safe (2)."""
+        addr = (getattr(settings, "FUNDER_ADDRESS", "") or "").strip()
+        if not (addr.startswith("0x") and len(addr) == 42):
+            return None
+        try:
+            from web3 import Web3
+            chk = Web3.to_checksum_address(addr)
+        except Exception:
+            return None
+        eoa = self.get_eoa_address()
+        if eoa and chk.lower() == eoa.lower():
+            return 0, chk
+        st = 3
+        if gasless is not None:
+            try:
+                detected = gasless.detect_wallet_signature_type(chk)
+                if detected in (1, 2):
+                    st = detected
+            except Exception:
+                pass
+        return st, chk
+
     def _candidate_wallets(self, gasless) -> List[Tuple[int, str, str]]:
-        """(signature_type, address, label) candidates derived from the EOA:
-        0. Explicit user override if configured
-        1. Polymarket Official Profile Wallet (automatic via Gamma public profile)
-        2. Modern Beacon Deposit Wallet (V2, st=3, post-June 29 standard)
-        3. Legacy UUPS Deposit Wallet (st=3, pre-June 29)
-        4. Legacy Proxy Wallet (st=1)
-        5. Safe Proxy Wallet (st=2)
-        6. Direct EOA Signer (st=0)
-        Never includes unverified counterparty maker addresses from market trades."""
+        """(signature_type, address, label) for the wallets this key can own:
+        the configured wallet if set (only that one), else the addresses computed
+        from the EOA. Addresses read from trade history are NOT used: on a fill where
+        you were the resting order, `maker_address` is the other trader's wallet."""
+        from web3 import Web3
         out: List[Tuple[int, str, str]] = []
 
-        # Derive EOA address
-        eoa_addr = None
-        try:
-            from eth_account import Account
-            eoa_addr = Account.from_key(settings.PRIVATE_KEY).address
-        except Exception:
-            eoa_addr = None
-
-        # Explicit user override
-        explicit_funder = getattr(settings, "FUNDER_ADDRESS", "").strip()
-        if explicit_funder and explicit_funder.startswith("0x") and len(explicit_funder) == 42:
+        def add(st, addr, label):
             try:
-                from web3 import Web3
-                chk = Web3.to_checksum_address(explicit_funder)
-                detected_st = None
+                if not addr:
+                    return
+                chk = Web3.to_checksum_address(addr)
+                if not any(a.lower() == chk.lower() for _, a, _ in out):
+                    out.append((st, chk, label))
+            except Exception:
+                pass
+
+        configured = self._configured_wallet(gasless)
+        if configured:
+            add(configured[0], configured[1], "Configured Wallet (Settings)")
+            return out
+
+        eoa = self.get_eoa_address()
+        if eoa:
+            try:
+                add(3, derive_beacon_deposit_wallet(eoa), "Deposit Wallet (accounts after Jun 29 2026)")
+            except Exception:
+                pass
+        for st, name, label in (
+            (3, "get_expected_deposit_wallet", "Deposit Wallet (accounts before Jun 29 2026)"),
+            (1, "get_poly_proxy_wallet_address", "Polymarket Proxy Wallet"),
+            (2, "get_safe_proxy_wallet_address", "Gnosis Safe Proxy"),
+        ):
+            try:
+                getter = getattr(gasless, name, None)
+                if getter is not None:
+                    add(st, getter(), label)
+            except Exception:
+                pass
+        if eoa:
+            add(0, eoa, "Personal Signer (EOA)")
+        return out
+
+    def _derived_wallets(self, gasless=None) -> Dict[str, str]:
+        """label -> address computed from the EOA (no network). Used to check a
+        configured wallet against the key. Pass a gasless client that has NOT been
+        bound to a funder yet (binding replaces its address getters)."""
+        out: Dict[str, str] = {}
+        eoa = self.get_eoa_address()
+        if not eoa:
+            return out
+        try:
+            out["deposit wallet (after Jun 29 2026)"] = derive_beacon_deposit_wallet(eoa)
+        except Exception:
+            pass
+        try:
+            probe = gasless if gasless is not None else self._new_gasless(3)
+            for name, label in (("get_expected_deposit_wallet", "deposit wallet (before Jun 29 2026)"),
+                                ("get_poly_proxy_wallet_address", "proxy wallet"),
+                                ("get_safe_proxy_wallet_address", "safe wallet")):
                 try:
-                    detected_st = gasless.detect_wallet_signature_type(chk)
+                    out[label] = getattr(probe, name)()
                 except Exception:
-                    detected_st = None
-                st_to_use = detected_st if detected_st in (0, 1, 2, 3) else 3
-                out.append((st_to_use, chk, "Configured Funder (User Override)"))
-                return out
-            except Exception:
-                pass
-
-        # 1. Polymarket Official Gamma Profile Discovery (Works for all accounts: Email/Magic, Metamask, Turnkey, etc.)
-        if eoa_addr:
-            try:
-                import urllib.request
-                import json
-                from web3 import Web3
-                gamma_url = f"{settings.GAMMA_BASE_URL.rstrip('/')}/public-profile?address={eoa_addr}"
-                req = urllib.request.Request(gamma_url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=5.0) as resp:
-                    if resp.status == 200:
-                        data = json.loads(resp.read().decode("utf-8"))
-                        profile_proxy = data.get("proxyWallet")
-                        if profile_proxy and profile_proxy.startswith("0x") and len(profile_proxy) == 42:
-                            chk_profile = Web3.to_checksum_address(profile_proxy)
-                            detected_st = None
-                            try:
-                                detected_st = gasless.detect_wallet_signature_type(chk_profile)
-                            except Exception:
-                                detected_st = None
-                            st_to_use = detected_st if detected_st in (0, 1, 2, 3) else 3
-                            out.append((st_to_use, chk_profile, "Polymarket Profile Wallet (Automatic)"))
-            except Exception:
-                pass
-
-        # 2. Modern Beacon Proxy Deposit Wallet (st=3, June 29, 2026+ standard)
-        if eoa_addr:
-            try:
-                beacon_wallet = derive_beacon_deposit_wallet(eoa_addr)
-                if beacon_wallet and not any(a.lower() == beacon_wallet.lower() for _, a, _ in out):
-                    out.append((3, beacon_wallet, "Deposit Wallet (Beacon V2)"))
-            except Exception:
-                pass
-
-        # 3. Legacy UUPS Deposit Wallet (st=3, polymarket-apis 2.3.0 default)
-        try:
-            legacy_dep = gasless.get_expected_deposit_wallet()
-            if legacy_dep and not any(a.lower() == legacy_dep.lower() for _, a, _ in out):
-                out.append((3, legacy_dep, "Legacy Deposit Wallet (UUPS)"))
+                    pass
         except Exception:
             pass
-
-        # 4. Polymarket Proxy Wallet (st=1)
-        try:
-            poly_proxy = gasless.get_poly_proxy_wallet_address()
-            if poly_proxy and not any(a.lower() == poly_proxy.lower() for _, a, _ in out):
-                out.append((1, poly_proxy, "Polymarket Proxy Wallet"))
-        except Exception:
-            pass
-
-        # 5. Safe Proxy Wallet (st=2)
-        try:
-            safe_proxy = gasless.get_safe_proxy_wallet_address()
-            if safe_proxy and not any(a.lower() == safe_proxy.lower() for _, a, _ in out):
-                out.append((2, safe_proxy, "Gnosis Safe Proxy"))
-        except Exception:
-            pass
-
-        # 6. Direct EOA (st=0)
-        if eoa_addr and not any(a.lower() == eoa_addr.lower() for _, a, _ in out):
-            out.append((0, eoa_addr, "Personal Signer (EOA)"))
-
         return out
 
     def _pick_funded_wallet(self, gasless) -> Tuple[int, str]:
-        """Trade from where the money actually is: pick the candidate holding pUSD or USDC.e.
-        Falls back to CLOB API balance check and then the Beacon deposit wallet when balances read 0."""
-        explicit_funder = getattr(settings, "FUNDER_ADDRESS", "").strip()
-        if explicit_funder and explicit_funder.startswith("0x") and len(explicit_funder) == 42:
+        """The configured wallet if set. Otherwise the computed wallet holding the most
+        pUSD/USDC.e; if none reads above 0, a deposit wallet that is deployed; else the
+        post-Jun-29 deposit wallet, logged as a guess. Sets self.wallet_source."""
+        configured = self._configured_wallet(gasless)
+        if configured:
+            self.wallet_source = "configured"
+            return configured
+
+        candidates = self._candidate_wallets(gasless)
+        best = None  # (st, addr, balance, label)
+        for st, addr, label in candidates:
+            pusd_bal, usdc_e_bal = self._get_onchain_balances(gasless, addr)
+            bal = max(pusd_bal, usdc_e_bal)
+            if bal > 0 and (best is None or bal > best[2]):
+                best = (st, addr, bal, label)
+        if best:
+            self.wallet_source = f"auto: {best[3]} holds ${best[2]:,.2f}"
+            return best[0], best[1]
+
+        for st, addr, label in candidates:
+            if st != 3:
+                continue
             try:
-                from web3 import Web3
-                chk = Web3.to_checksum_address(explicit_funder)
-                detected_st = None
-                try:
-                    detected_st = gasless.detect_wallet_signature_type(chk)
-                except Exception:
-                    detected_st = None
-                return (detected_st if detected_st in (0, 1, 2, 3) else 3), chk
+                code = gasless.w3.eth.get_code(addr)
+                if code and len(code) > 0:
+                    self.wallet_source = f"auto: {label}, deployed, balance 0"
+                    return st, addr
             except Exception:
                 pass
 
-        candidates = self._candidate_wallets(gasless)
-        best = None  # (sig_type, addr, total_onchain_balance)
-        for item in candidates:
-            st, addr = item[0], item[1]
-            pusd_bal, usdc_e_bal = self._get_onchain_balances(gasless, addr)
-            total_bal = max(pusd_bal, usdc_e_bal)
-            if total_bal > 0:
-                # Immediate early exit on first funded wallet (eliminates 10+ redundant RPC calls)
-                return st, addr
-            if best is None or total_bal > best[2]:
-                best = (st, addr, total_bal)
-
-        if best and best[2] > 0:
-            return best[0], best[1]
-
-        # Fallback: check CLOB API collateral balance across user's genuine candidate wallets
-        try:
-            from polymarket_apis.clients.clob_client import PolymarketClobClient
-            creds = self._derive_creds()
-            for item in candidates:
-                st, addr = item[0], item[1]
-                try:
-                    c = PolymarketClobClient(private_key=settings.PRIVATE_KEY, address=addr, chain_id=137, signature_type=st)
-                    c.set_api_creds(creds)
-                    clob_bal = float(c.get_pusd_balance())
-                    if clob_bal > 0:
-                        return st, addr
-                except Exception:
-                    continue
-        except Exception:
-            pass
-
         if candidates:
-            # First candidate is the modern Beacon deposit wallet
-            return candidates[0][0], candidates[0][1]
-
-        # Ultimate fallback
-        try:
-            from eth_account import Account
-            eoa = Account.from_key(settings.PRIVATE_KEY).address
-            return 3, derive_beacon_deposit_wallet(eoa)
-        except Exception:
-            return 3, gasless.get_expected_deposit_wallet()
+            st, addr, label = candidates[0]
+        else:
+            st, addr, label = 3, derive_beacon_deposit_wallet(self.get_eoa_address()), "Deposit Wallet"
+        self.wallet_source = f"auto GUESS: {label} (no balance found) — put your wallet address in Settings"
+        return st, addr
 
     def _init_clients(self):
         from polymarket_apis.clients.clob_client import PolymarketClobClient
 
         # Any gasless client can derive every candidate address; probe with deposit.
         probe = self._new_gasless(3)
+        derived = self._derived_wallets(probe)  # before _bind_gasless_funder() rewires the probe
         sig_type, funder = self._pick_funded_wallet(probe)
 
         gasless = probe if sig_type == 3 else self._new_gasless(sig_type, funder=funder)
@@ -472,7 +539,10 @@ class ClobTrader:
         rust_mod = _ensure_rust_clob()
         pk_hex = clob.signer.account.key.hex() if hasattr(clob.signer, "account") else clob.signer.private_key
         creds = clob.creds
-        rust_mod.init_client(
+        eoa = self.get_eoa_address() or ""
+        mode = self._start_signer_mode(sig_type, funder)
+        signer = funder if (sig_type == 3 and mode == "wallet") else eoa
+        base_args = (
             str(pk_hex),
             str(funder),
             int(sig_type),
@@ -482,7 +552,24 @@ class ClobTrader:
             str(clob.base_url),
             137,
         )
+        try:
+            rust_mod.init_client(*base_args, signer_address=str(signer))
+            self._rust_can_switch = hasattr(rust_mod, "set_signer")
+        except TypeError:
+            # rust_clob still built from the previous lib.rs: no signer choice there,
+            # it always puts the deposit wallet in order.signer for type 3.
+            rust_mod.init_client(*base_args)
+            self._rust_can_switch = False
+            mode = "wallet" if sig_type == 3 else "eoa"
+            self._log("WARNING: rust_clob was not rebuilt from the new lib.rs, so the order signer "
+                      "can't be switched. Rebuild it: pip install --no-deps --force-reinstall ./rust_clob")
+        self._signer_mode = mode
         self._rust_ready = True
+        if not all(hasattr(rust_mod, n) for n in ("post_order_async", "warm_connection")):
+            self._log("WARNING: rust_clob is an older build without the fast order sender: "
+                      "orders wait for a Python thread. If rust_clob was just "
+                      "rebuilt, restart the bot to load the new build; otherwise rebuild it: "
+                      "pip install --no-deps --force-reinstall ./rust_clob")
 
         self.gasless = gasless
         self.clob = clob
@@ -490,6 +577,90 @@ class ClobTrader:
         self.signature_type = sig_type
         self.ready = True
         self.last_error = None
+
+        self._log(f"LIVE WALLET: EOA {eoa} (from your key) | trading wallet {funder} "
+                  f"(sig type {sig_type}, {self.wallet_source or 'auto'}) | order signer: "
+                  f"{self._signer_label(mode, sig_type)} (setting: {self._signer_setting()}) | "
+                  f"API key {str(creds.key)[:7]} made by the EOA")
+        self._check_configured_wallet(funder, sig_type, derived)
+
+    # ── order signer (type 3) ───────────────────────────────────────────────────
+    @staticmethod
+    def _signer_setting() -> str:
+        v = str(getattr(settings, "ORDER_SIGNER", "auto") or "auto").strip().lower()
+        return v if v in ("auto", "wallet", "eoa") else "auto"
+
+    def _start_signer_mode(self, sig_type: int, funder: str = "") -> str:
+        """"wallet" = order.signer is the deposit wallet (Polymarket's docs);
+        "eoa" = order.signer is the key's own address (how this bot ran before).
+        Types 0/1/2 always sign as the EOA. In auto, reuse what Polymarket accepted
+        earlier in this run for the same EOA + wallet."""
+        if sig_type != 3:
+            return "eoa"
+        setting = self._signer_setting()
+        if setting in ("wallet", "eoa"):
+            return setting
+        ok = self._signer_ok
+        eoa = (self.get_eoa_address() or "").lower()
+        if ok and ok[0] == eoa and ok[1] == str(funder).lower():
+            return ok[2]
+        return "wallet"
+
+    @staticmethod
+    def _signer_label(mode: str, sig_type: Optional[int] = 3) -> str:
+        if sig_type != 3 or mode == "eoa":
+            return "EOA"
+        return "deposit wallet"
+
+    def _set_rust_signer(self, rust_mod, mode: str) -> bool:
+        if not self._rust_can_switch or self.signature_type != 3:
+            return False
+        try:
+            rust_mod.set_signer(str(self.funder) if mode == "wallet" else str(self.get_eoa_address() or ""))
+            self._signer_mode = mode
+            return True
+        except Exception as e:
+            self._log(f"LIVE SIGNER: could not switch the order signer: {type(e).__name__}: {e}")
+            return False
+
+    def _order_context(self, mode: Optional[str] = None) -> str:
+        """What an order carries (maker, signer, type, key), for error lines. `mode`
+        names the signer used when it differs from the current Rust state."""
+        eoa = self.get_eoa_address() or "?"
+        ident = None
+        try:
+            import sys
+            mod = sys.modules.get("rust_clob")
+            if mod is not None and hasattr(mod, "get_identity") and mod.is_initialized():
+                ident = mod.get_identity()
+        except Exception:
+            ident = None
+        st = (ident or {}).get("signature_type", self.signature_type)
+        maker = (ident or {}).get("maker") or self.funder or "?"
+        if mode is not None:
+            signer = maker if (st == 3 and mode == "wallet") else eoa
+        else:
+            signer = (ident or {}).get("signer")
+        if not signer:
+            signer = maker if (st == 3 and self._signer_mode != "eoa") else eoa
+        who = "EOA" if str(signer).lower() == str(eoa).lower() else (
+            "deposit wallet" if str(signer).lower() == str(maker).lower() else "other")
+        key = (self.get_api_key() or "")[:7] or "unknown"
+        return f"maker {maker}, signer {signer} ({who}), sig type {st}, API key {key} made by EOA {eoa}"
+
+    def _check_configured_wallet(self, funder: str, sig_type: int, derived: Optional[Dict[str, str]] = None):
+        """A configured wallet that isn't computed from this key is the usual cause of
+        'the order signer address has to be the address of the API KEY'."""
+        if self.wallet_source != "configured" or sig_type == 0:
+            return
+        if derived is None:
+            derived = self._derived_wallets()
+        if not derived or any(str(a).lower() == str(funder).lower() for a in derived.values()):
+            return
+        listed = "; ".join(f"{k} {v}" for k, v in derived.items())
+        self._log(f"WARNING: the wallet in Settings ({funder}) is not one of the wallets computed from "
+                  f"this key: {listed}. Polymarket refuses orders whose wallet doesn't belong to the key "
+                  f"with 'the order signer address has to be the address of the API KEY'.")
 
     def is_ready(self) -> bool:
         """Check if CLOB client is initialized and ready without triggering blocking setup."""
@@ -506,9 +677,6 @@ class ClobTrader:
                 return False
             try:
                 self._init_clients()
-                # Pre-warm native Rust crypto signing context
-                rust_mod = _ensure_rust_clob()
-                _ = rust_mod.build_signed_order("1", 1000000, 1000000, 0, "FAK", "0", False, False, False)
                 return True
             except Exception as e:
                 self.last_error = f"{type(e).__name__}: {e}"
@@ -561,12 +729,22 @@ class ClobTrader:
         order_type_str: str,
         expiration_str: str = "0",
         neg_risk: bool = False,
+        post_only: bool = False,
     ) -> Dict[str, Any]:
         """Sign EIP-712 / Solady ERC-1271 order and POST via native Rust (`rust_clob`),
         releasing the GIL during network I/O."""
-        import json
         rust_mod = _ensure_rust_clob()
-        res = rust_mod.post_order(
+        post_args = self._post_args(token_id, maker_amount, taker_amount, side_int, order_type_str, expiration_str, neg_risk,
+                                    post_only)
+        res = rust_mod.post_order(*post_args)
+        return self._finish_post(res, post_args, rust_mod)
+
+    @staticmethod
+    def _post_args(token_id, maker_amount, taker_amount, side_int, order_type_str, expiration_str="0", neg_risk=False,
+                   post_only=False):
+        # PATCH: longshot maker — post_only: Polymarket refuses the order instead of letting it
+        # take the book (GTC / GTD only), so a resting bid never pays the taker fee
+        return (
             str(token_id),
             int(maker_amount),
             int(taker_amount),
@@ -574,38 +752,73 @@ class ClobTrader:
             str(order_type_str),
             str(expiration_str),
             bool(neg_risk),
-            False,
+            bool(post_only),
             False,
         )
-        http_status = int(res.get("http_status") or 0)
-        resp_text = res.get("response_text") or ""
-        if not res.get("ok_http"):
-            err_detail = resp_text
+
+    def _finish_post(self, res: Dict[str, Any], post_args: tuple, rust_mod) -> Dict[str, Any]:
+        """Polymarket's answer to a posted order -> its JSON (raises on refusal). A refused
+        order signer is retried once with the other signer, as before."""
+        import json
+
+        def detail_of(r) -> str:
+            text = r.get("response_text") or ""
             try:
-                err_json = json.loads(resp_text) if resp_text else {}
-                if isinstance(err_json, dict):
-                    err_detail = (
-                        err_json.get("error")
-                        or err_json.get("errorMsg")
-                        or err_json.get("message")
-                        or resp_text
-                    )
+                j = json.loads(text) if text else {}
+                if isinstance(j, dict):
+                    return str(j.get("error") or j.get("errorMsg") or j.get("message") or text)
             except Exception:
                 pass
+            return text
+
+        # Type-3 orders: if Polymarket refuses the order signer, try the other signer
+        # once (deposit wallet <-> EOA). A refused order was never placed, so this
+        # can't double up. Whichever is accepted is kept for the rest of the session.
+        retry_note = ""
+        second_mode = None
+        if (not res.get("ok_http") and int(res.get("http_status") or 0) in (400, 401, 403)
+                and self._signer_setting() == "auto" and self.signature_type == 3
+                and _is_signer_key_error(detail_of(res))):
+            first_mode = self._signer_mode or "wallet"
+            first_line = f"HTTP {int(res.get('http_status') or 0)} - {detail_of(res)} [{self._order_context()}]"
+            other = "eoa" if first_mode == "wallet" else "wallet"
+            if self._set_rust_signer(rust_mod, other):
+                res = rust_mod.post_order(*post_args)
+                if res.get("ok_http"):
+                    self._signer_ok = ((self.get_eoa_address() or "").lower(), str(self.funder).lower(), other)
+                    self._log(f"LIVE SIGNER: Polymarket refused order signer = {self._signer_label(first_mode)} "
+                              f"and accepted order signer = {self._signer_label(other)}; keeping that. "
+                              f"(Refused: {first_line})")
+                else:
+                    second_mode = other
+                    retry_note = f" | first try: {first_line}"
+                    self._set_rust_signer(rust_mod, first_mode)
+
+        http_status = int(res.get("http_status") or 0)
+        if not res.get("ok_http"):
             if http_status == 0:
-                raise RuntimeError(res.get("transport_error") or "rust_clob transport error")
-            err_detail = self.enrich_order_error(err_detail)
+                raise RuntimeError((res.get("transport_error") or "rust_clob transport error") + retry_note)
+            if second_mode:
+                err_detail = f"{detail_of(res)} [{self._order_context(second_mode)}]{retry_note}"
+            else:
+                err_detail = self.enrich_order_error(detail_of(res))
             raise RuntimeError(f"OrderPlacementError: Order placement failed: HTTP {http_status} - {err_detail}")
+        resp_text = res.get("response_text") or ""
         data = json.loads(resp_text) if resp_text else {}
         if isinstance(data, dict):
             data["rust_sign_us"] = res.get("sign_time_us")
             data["rust_total_us"] = res.get("total_time_us")
         return data
 
-    def place_limit_buy(self, token_id: str, size: float, price: float, expiration: Optional[int] = None) -> Dict[str, Any]:
+    def place_limit_buy(self, token_id: str, size: float, price: float, expiration: Optional[int] = None,
+                        tick_size: str = "0.01", order_type: str = "GTD", post_only: bool = False) -> Dict[str, Any]:
         """Place a Good 'Til Date (GTD) limit BUY order for `size` shares at `price`.
         Sweeps asks up to `price` and rests any remaining unfilled size on the book
-        until filled, cancelled, or the expiration timestamp is reached."""
+        until filled, cancelled, or the expiration timestamp is reached.
+        PATCH: longshot — `tick_size` "0.001" keeps sub-cent prices (below 4¢ / above 96¢)
+        instead of rounding them to whole cents; `order_type` "FAK" (fill-and-kill) buys
+        what's offered up to `price` at once and cancels the rest (no expiration).
+        PATCH: longshot maker — `post_only` (GTC / GTD): refused instead of taking the book."""
         if not token_id:
             return {"ok": False, "error": "missing_token_id"}
         if not self.ensure_ready():
@@ -616,36 +829,100 @@ class ClobTrader:
             except Exception:
                 pass
         try:
-            from polymarket_apis.utilities.order_builder.builder import ROUNDING_CONFIG
-            order_price = round(float(price), 4)
-            order_size = round(float(size), 2)
-            exp = int(expiration) if expiration and expiration > (time.time() + 180) else int(time.time() + 300)
-            self.warm_token(token_id)
-            side_int, maker_amt, taker_amt = self.clob.builder.get_order_amounts(
-                "BUY", order_size, order_price, ROUNDING_CONFIG["0.01"]
-            )
+            tick, otype = self._tick_and_type(tick_size, order_type)
+            self.warm_token(token_id, tick)
+            order_price, order_size, exp, side_int, maker_amt, taker_amt = self._limit_buy_amounts(size, price, expiration, tick)
             data = self._post_order_fast(
                 token_id=str(token_id),
                 maker_amount=maker_amt,
                 taker_amount=taker_amt,
                 side_int=side_int,
-                order_type_str="GTD",
-                expiration_str=str(exp),
+                order_type_str=otype,
+                expiration_str=str(exp) if otype == "GTD" else "0",
                 neg_risk=False,
+                post_only=bool(post_only) and otype in ("GTC", "GTD"),
             )
-            order_id = data.get("order_id") or data.get("orderID") or data.get("orderId") or data.get("id")
-            status = str(data.get("status", "")).lower()
-            return {
-                "ok": bool(order_id),
-                "order_id": order_id,
-                "status": status or "open",
-                "price": order_price,
-                "size": order_size,
-                "expiration": exp,
-                "response": data
-            }
+            return self._limit_buy_result(data, order_price, order_size, exp)
         except Exception as e:
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    @staticmethod
+    def _tick_and_type(tick_size: str, order_type: str) -> Tuple[str, str]:
+        """PATCH: longshot — the rounding to sign with ("0.01" unless "0.001" is asked for)
+        and the order type ("GTD" unless "FAK", "FOK" or "GTC" is asked for)."""
+        from polymarket_apis.utilities.order_builder.builder import ROUNDING_CONFIG
+        tick = tick_size if tick_size in ROUNDING_CONFIG else "0.01"
+        otype = str(order_type or "GTD").upper()
+        return tick, (otype if otype in ("GTD", "FAK", "FOK", "GTC") else "GTD")
+
+    def _limit_buy_amounts(self, size: float, price: float, expiration: Optional[int], tick_size: str = "0.01"):
+        from polymarket_apis.utilities.order_builder.builder import ROUNDING_CONFIG
+        order_price = round(float(price), 4)
+        order_size = round(float(size), 2)
+        exp = int(expiration) if expiration and expiration > (time.time() + 180) else int(time.time() + 300)
+        side_int, maker_amt, taker_amt = self.clob.builder.get_order_amounts(
+            "BUY", order_size, order_price, ROUNDING_CONFIG[tick_size if tick_size in ROUNDING_CONFIG else "0.01"]
+        )
+        return order_price, order_size, exp, side_int, maker_amt, taker_amt
+
+    @staticmethod
+    def _limit_buy_result(data: Dict[str, Any], order_price: float, order_size: float, exp: int) -> Dict[str, Any]:
+        order_id = data.get("order_id") or data.get("orderID") or data.get("orderId") or data.get("id")
+        status = str(data.get("status", "")).lower()
+        return {
+            "ok": bool(order_id),
+            "order_id": order_id,
+            "status": status or "open",
+            "price": order_price,
+            "size": order_size,
+            "expiration": exp,
+            "response": data
+        }
+
+    async def place_limit_buy_async(self, token_id: str, size: float, price: float,
+                                    expiration: Optional[int] = None, tick_size: str = "0.01",
+                                    order_type: str = "GTD", post_only: bool = False) -> Dict[str, Any]:
+        """place_limit_buy() without waiting for a Python thread: the order is signed right
+        here (about 0.1 ms) and sent by rust_clob's own threads, so it leaves at once even
+        while Python is busy with something else. Same result dict. Falls back to
+        place_limit_buy() in a thread when the client isn't set up yet or rust_clob was
+        built before post_order_async existed."""
+        import asyncio
+        mod = sys.modules.get("rust_clob")
+        if (not token_id or not (self.ready and self._rust_ready) or mod is None
+                or not hasattr(mod, "post_order_async")
+                or (not self._approvals_done and settings.RELAYER_API_KEY)):
+            return await asyncio.to_thread(self.place_limit_buy, token_id, size, price, expiration, tick_size, order_type,
+                                           post_only)
+        try:
+            tick, otype = self._tick_and_type(tick_size, order_type)
+            self.warm_token(token_id, tick)
+            order_price, order_size, exp, side_int, maker_amt, taker_amt = self._limit_buy_amounts(size, price, expiration, tick)
+            post_args = self._post_args(token_id, maker_amt, taker_amt, side_int, otype,
+                                        str(exp) if otype == "GTD" else "0", False,
+                                        bool(post_only) and otype in ("GTC", "GTD"))
+            ticket = mod.post_order_async(*post_args)
+        except Exception as e:
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        try:
+            res = await asyncio.to_thread(mod.post_order_wait, ticket, 30.0)
+            data = await asyncio.to_thread(self._finish_post, res, post_args, mod)
+            return self._limit_buy_result(data, order_price, order_size, exp)
+        except Exception as e:
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    def keep_warm(self) -> Optional[Dict[str, Any]]:
+        """A small request over the Rust order connection (main.py's order_conn_keeper), so
+        it's open when the next order goes out."""
+        if not (self.ready and self._rust_ready):
+            return None
+        mod = sys.modules.get("rust_clob")
+        if mod is None or not hasattr(mod, "warm_connection"):
+            return None
+        try:
+            return mod.warm_connection("/time")
+        except Exception as e:
+            return {"http_status": 0, "transport_error": f"{type(e).__name__}: {e}"}
 
     def place_limit_sell(self, token_id: str, size: float, price: float, expiration: Optional[int] = None) -> Dict[str, Any]:
         """Place a Good 'Til Date (GTD) limit SELL order for `size` shares at `price`."""
@@ -921,7 +1198,14 @@ class ClobTrader:
 
             # If active funder appears below amount on-chain, scan all candidate wallets (Deposit, Proxy, Safe)
             if pusd_bal < amount and usdc_e_bal < amount:
-                for cand_st, cand_addr in self._candidate_wallets(self.gasless):
+                try:
+                    scan = self._new_gasless(3)  # unbound: self.gasless's getters now return the funder
+                except Exception:
+                    scan = self.gasless
+                for item in self._candidate_wallets(scan):
+                    cand_st, cand_addr = item[0], item[1]
+                    if cand_addr.lower() == str(target_funder).lower():
+                        continue
                     c_pusd, c_usdce = self._get_onchain_balances(self.gasless, cand_addr)
                     if c_pusd >= amount or c_usdce >= amount:
                         target_funder = cand_addr
@@ -1011,48 +1295,20 @@ class ClobTrader:
         return None
 
     def enrich_order_error(self, err: Any) -> str:
-        """Enrich Polymarket error messages with specific signer address and API key prefix."""
+        """Polymarket's error text exactly as sent, plus what the order carried:
+        [maker …, signer … (EOA|deposit wallet), sig type …, API key … made by EOA …].
+        (The previous version replaced the address in the message with the EOA, so the
+        log named the EOA as "the order signer" even when the order was signed as the
+        deposit wallet.)"""
         if not err:
             return ""
-        err_str = str(err)
-        import re
-        if "the order signer address has to be the address of the API KEY" in err_str or (
-            "order signer address" in err_str.lower() and "address of the api key" in err_str.lower()
-        ):
-            signer_addr = self.get_eoa_address()
-            if not signer_addr and self.clob and hasattr(self.clob, "signer"):
-                signer_addr = getattr(self.clob.signer, "address", "") or getattr(getattr(self.clob.signer, "account", None), "address", "")
-            if not signer_addr and settings.PRIVATE_KEY:
-                try:
-                    from eth_account import Account
-                    signer_addr = Account.from_key(settings.PRIVATE_KEY).address
-                except Exception:
-                    pass
-            signer_addr = signer_addr or "unknown"
-
-            api_key_str = self.get_api_key() or ""
-            api_prefix = api_key_str[:7] if api_key_str else "unknown"
-
-            if f"the order signer address {signer_addr} has to be the address of the API KEY {api_prefix}" in err_str:
-                return err_str
-
-            pattern = re.compile(
-                r"the order signer address\s*(?:\{put the address\}|0x[0-9a-fA-F]{40})?\s*has to be the address of the API KEY(?:\s*\{put in the first 7 characters of the API\}|\s*[a-zA-Z0-9_\-]+)?",
-                re.IGNORECASE
-            )
-            if pattern.search(err_str):
-                return pattern.sub(
-                    f"the order signer address {signer_addr} has to be the address of the API KEY {api_prefix}",
-                    err_str
-                )
-            else:
-                return re.sub(
-                    r"the order signer address.*?address of the API KEY",
-                    f"the order signer address {signer_addr} has to be the address of the API KEY {api_prefix}",
-                    err_str,
-                    flags=re.IGNORECASE
-                )
-        return err_str
+        s = str(err)
+        if "[maker " in s:
+            return s
+        try:
+            return f"{s} [{self._order_context()}]"
+        except Exception:
+            return s
 
     def get_eoa_address(self) -> Optional[str]:
         """The EOA address derived from PRIVATE_KEY — the wallet you control (the
@@ -1078,6 +1334,7 @@ class ClobTrader:
             return {"ok": False, "error": f"invalid_key: {type(e).__name__}: {e}"}
         try:
             probe = self._new_gasless(3)
+            derived = self._derived_wallets(probe)
             wallets = []
             candidates = self._candidate_wallets(probe)
             for item in candidates:
@@ -1111,11 +1368,20 @@ class ClobTrader:
                     if w["address"].lower() == funder.lower():
                         w["pusd_balance"] = clob_bal
 
+            warning = ""
+            if (self.wallet_source == "configured" and sig_type != 0 and derived
+                    and not any(str(a).lower() == str(funder).lower() for a in derived.values())):
+                listed = "; ".join(f"{k} {v}" for k, v in derived.items())
+                warning = (f"WARNING: the wallet in Settings ({funder}) is not one of the wallets computed "
+                           f"from this key: {listed}.")
             return {
                 "ok": True,
                 "eoa": eoa,
                 "chosen_signature_type": sig_type,
                 "funder": funder,
+                "wallet_source": self.wallet_source,
+                "wallet_warning": warning,
+                "expected_deposit_wallet": derived.get("deposit wallet (after Jun 29 2026)", ""),
                 "relayer_key_set": bool(settings.RELAYER_API_KEY),
                 "wallets": wallets,
             }
@@ -1175,6 +1441,5 @@ class ClobTrader:
             return getattr(self, "_cached_balance", None)
         finally:
             self._balance_fetching = False
-
 
 clob_trader = ClobTrader()

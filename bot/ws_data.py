@@ -1,4 +1,5 @@
 import asyncio
+import collections  # PATCH: longshot maker
 import time
 from typing import Optional, Callable, Dict, List
 import aiohttp
@@ -358,11 +359,13 @@ class PolymarketChainlinkStream:
 class PolymarketClobMarketStream:
     """Real-time orderbook and price feed for active Polymarket tokens over CLOB Market WS."""
     def __init__(self, ws_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market", on_update=None):
-        self.on_update = on_update
         self.ws_url = ws_url
+        self.on_update = on_update
         self.asset_ids: List[str] = []
         self.books: Dict[str, Dict] = {} # asset_id -> {"bids": [...], "asks": [...], "best_bid": float, "best_ask": float}
         self.book_levels: Dict[str, Dict[str, Dict[float, float]]] = {} # asset_id -> {"bids": {px: sz}, "asks": {px: sz}}
+        # PATCH: longshot maker — recent trades per asset_id: (received, price, size, Polymarket's timestamp)
+        self.trades: Dict[str, "collections.deque"] = {}
         self.last_ts: float = 0
         self.closed = False
         self._ws = None
@@ -374,8 +377,12 @@ class PolymarketClobMarketStream:
     def update_assets(self, asset_ids: List[str]):
         new_ids = sorted(list(set(asset_ids)))
         if new_ids != self.asset_ids:
+            # Keep the books of tokens that stay subscribed (the next window's books are
+            # subscribed before it opens and must still be there when it does); drop the rest.
+            for aid in set(self.asset_ids) - set(new_ids):
+                self.books.pop(aid, None)
+                self.book_levels.pop(aid, None)
             self.asset_ids = new_ids
-            self.reset_books()
             if self._ws and not self._ws.closed and self.asset_ids:
                 asyncio.create_task(self._subscribe(self._ws))
 
@@ -494,6 +501,9 @@ class PolymarketClobMarketStream:
         # Full book snapshot (list)
         elif isinstance(data, list):
             for item in data:
+                if isinstance(item, dict) and item.get("event_type") == "last_trade_price":
+                    self._note_trade(item)   # PATCH: longshot maker — a trade, not a book snapshot
+                    continue
                 if isinstance(item, dict) and "asset_id" in item:
                     aid = str(item["asset_id"])
                     levels = self.book_levels.setdefault(aid, {"bids": {}, "asks": {}})
@@ -557,6 +567,33 @@ class PolymarketClobMarketStream:
                     if data.get("best_ask") is not None:
                         try: self.books[aid]["best_ask"] = float(data["best_ask"])
                         except (TypeError, ValueError): pass
+
+            if data.get("event_type") == "last_trade_price":   # PATCH: longshot maker
+                self._note_trade(data)
+
+        if self.on_update:
+            try:
+                self.on_update(data)
+            except Exception:
+                pass
+
+    def _note_trade(self, d: Dict) -> None:
+        """PATCH: longshot maker — a last_trade_price event (a match on this token)."""
+        aid = str(d.get("asset_id") or "")
+        try:
+            px, sz = float(d["price"]), float(d.get("size") or 0.0)
+        except (TypeError, ValueError, KeyError):
+            return
+        if not aid or px <= 0 or sz <= 0:
+            return
+        q = self.trades.get(aid)
+        if q is None:
+            q = self.trades[aid] = collections.deque(maxlen=200)
+        q.append((time.time(), px, sz, str(d.get("timestamp") or "")))
+
+    def recent_trades(self, asset_id: str, since_ts: float) -> List[tuple]:
+        """PATCH: longshot maker — trades on `asset_id` received after since_ts (unix seconds)."""
+        return [t for t in self.trades.get(str(asset_id), ()) if t[0] > since_ts]
 
     def get_token_market(self, asset_id: str) -> Dict:
         return self.books.get(str(asset_id), {})

@@ -1,70 +1,141 @@
 {
-    "private_key": "",
-    "copy_trader": {
-        "retry_interval_ms": 300,
-        "max_retries": 5
-    },
-    "live": {
-        "max_slippage": 0.05,
-        "exit_max_retries": 5,
-        "allow_partial_fill": true,
-        "funder_address": ""
-    },
-    "relayer": {
-        "api_key": ""
-    },
-    "capital_extractor": {
-        "enabled": false,
-        "trigger_balance": 76000,
-        "withdraw_amount": 75000,
-        "recipient_address": "",
-        "auto_resume": true,
-        "resume_after": "flat",
-        "withdraw_address": "",
-        "auto_resume_after_withdrawal": true,
-        "default_destination": ""
-    },
-    "telegram": {
-        "enabled": false,
-        "bot_token": "8394214124:AAGQs5vsfU3EustebtWTwtVk4ZgDcCeR-to"
-    },
-    "polymarket": {
-        "gamma_base_url": "https://gamma-api.polymarket.com",
-        "clob_base_url": "https://clob.polymarket.com",
-        "live_ws_url": "wss://ws-live-data.polymarket.com",
-        "series_id": "10192",
-        "series_slug": "btc-up-or-down-15m",
-        "auto_select_latest": true,
-        "up_label": "Up",
-        "down_label": "Down"
-    },
-    "trading": {
-        "symbol": "BTCUSDT",
-        "binance_base_url": "https://api.binance.com",
-        "candle_window_minutes": 15,
-        "poll_interval_ms": 1000,
-        "risk_type": "percent",
-        "risk_value": 10
-    },
-    "ev": {
-        "ev_threshold": 0.04,
-        "min_prob": 0.55,
-        "min_book_liquidity_usd": 20,
-        "max_book_age_s": 3
-    },
-    "settlement": {
-        "authoritative_settle_wait_s": 90
-    },
-    "flip": {
-        "enabled": false,
-        "min_conviction": 0.8,
-        "min_minutes_left": 9
-    },
-    "chainlink": {
-        "polygon_rpc_url": "https://polygon.drpc.org",
-        "polygon_wss_url": "wss://polygon-bor-rpc.publicnode.com",
-        "btc_usd_aggregator": "0xc907E116054Ad103354f2D350FD2514433D57F6f",
-        "alchemy_api_key": "DfkvQ854X-Kg4-ytU2sG0"
-    },
+  "private_key": "",
+  "copy_trader": {
+    "retry_interval_ms": 300,
+    "max_retries": 5,
+    "resting_timeout_s": 2.0
+  },
+  "live": {
+    "max_slippage": 0.05,
+    "exit_max_retries": 5,
+    "allow_partial_fill": true,
     "funder_address": ""
+  },
+  "relayer": {
+    "api_key": ""
+  },
+  "capital_extractor": {
+    "enabled": false,
+    "trigger_balance": 76000,
+    "withdraw_amount": 75000,
+    "recipient_address": "",
+    "auto_resume": true,
+    "resume_after": "flat",
+    "withdraw_address": "",
+    "auto_resume_after_withdrawal": true,
+    "default_destination": ""
+  },
+  "telegram": {
+    "enabled": false,
+    "bot_token": "8394214124:AAGQs5vsfU3EustebtWTwtVk4ZgDcCeR-to"
+  },
+  "polymarket": {
+    "gamma_base_url": "https://gamma-api.polymarket.com",
+    "clob_base_url": "https://clob.polymarket.com",
+    "live_ws_url": "wss://ws-live-data.polymarket.com",
+    "series_id": "10192",
+    "series_slug": "btc-up-or-down-15m",
+    "auto_select_latest": true,
+    "up_label": "Up",
+    "down_label": "Down"
+  },
+  "trading": {
+    "symbol": "BTCUSDT",
+    "binance_base_url": "https://api.binance.com",
+    "candle_window_minutes": 15,
+    "poll_interval_ms": 1000,
+    "risk_type": "percent",
+    "risk_value": 10
+  },
+  "ev": {
+    "ev_threshold": 0.04,
+    "min_prob": 0.55,
+    "min_book_liquidity_usd": 20,
+    "max_book_age_s": 3
+  },
+  "settlement": {
+    "authoritative_settle_wait_s": 90
+  },
+  "flip": {
+    "enabled": false,
+    "min_conviction": 0.8,
+    "min_minutes_left": 9
+  },
+  "chainlink": {
+    "polygon_rpc_url": "https://polygon.drpc.org",
+    "polygon_wss_url": "wss://polygon-bor-rpc.publicnode.com",
+    "btc_usd_aggregator": "0xc907E116054Ad103354f2D350FD2514433D57F6f",
+    "alchemy_api_key": "DfkvQ854X-Kg4-ytU2sG0"
+  },
+  "funder_address": "",
+  "longshot": {
+    "enabled": true,
+    "live": true,
+    "model": "twap",
+    "price_to_beat": "sampled_twap",
+    "pick": "multiple",
+    "stake_type": "",
+    "stake_value": null,
+    "growth_cap_pct": 30.0,
+    "max_per_window": 1,
+    "cutoff_s": 3.0,
+    "min_ask_liquidity_usd": 2.0,
+    "max_price_age_s": 3.0,
+    "slippage": 0.01,
+    "order_type": "FAK",
+    "max_attempts": 3,
+    "resting_s": 2.0,
+    "vol_usd_per_sqrt_s": 0.0,
+    "vol_fallback_usd_per_sqrt_s": 6.0,
+    "sd_floor_usd": 3.0,
+    "taker_fee_rate": 0.07,
+    "maker": {
+      "enabled": true,
+      "live": true,
+      "price": 0.01,
+      "min_prob": 0.2,
+      "max_ask": 0.3,
+      "look_s": 60,
+      "cutoff_s": 3.0,
+      "max_fills_per_window": 1,
+      "stake_type": "",
+      "stake_value": null,
+      "growth_cap_pct": null,
+      "requote_s": 2.0,
+      "poll_s": 1.0
+    },
+    "bands": {
+      "favored": {
+        "enabled": true,
+        "look_s": 60,
+        "ask_min": 0.07,
+        "ask_max": 0.1,
+        "max_price": 0.15,
+        "min_prob": 0.55,
+        "min_multiple": 0.0,
+        "stake_type": "",
+        "stake_value": null,
+        "growth_cap_pct": null
+      },
+      "final": {
+        "enabled": true,
+        "look_s": 60,
+        "ask_min": 0.01,
+        "ask_max": 0.03,
+        "max_price": 0.04,
+        "min_prob": 0.0,
+        "min_multiple": 10.0,
+        "stake_type": "",
+        "stake_value": null,
+        "growth_cap_pct": null
+      }
+    }
+  },
+  "redeem_sweep": {
+    "enabled": true,
+    "interval_s": 300,
+    "retry_after_s": 900,
+    "max_per_pass": 10,
+    "min_shares": 0.01
+  }
 }

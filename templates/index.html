@@ -238,11 +238,11 @@
                                 <template x-for="trade in data.trading_state?.active_trades" :key="trade.trade_id || trade.order_id || (trade.market_id + '_' + trade.paper_entry_time)">
                                     <tr class="border-t border-gray-700 hover:bg-gray-700/30 transition">
                                         <td class="px-4 py-3 truncate max-w-[150px] sm:max-w-[180px]" x-text="trade.market_slug"></td>
-                                        <td class="px-4 py-3 font-bold" :class="trade.side === 'UP' ? 'text-green-400' : 'text-red-400'" x-text="trade.side"></td>
-                                        <td class="px-4 py-3 font-mono text-gray-300" x-text="trade.paper_entry_price != null ? ((trade.paper_entry_price * 100).toFixed(0) + '¢') : ((trade.entry_price * 100).toFixed(0) + '¢')"></td>
+                                        <td class="px-4 py-3 font-bold" :class="trade.side === 'UP' ? 'text-green-400' : 'text-red-400'" x-text="trade.side + (trade.kind === 'longshot' ? (trade.open_reason === 'longshot_maker' ? ' · LS maker' : ' · LS') : '')"></td>
+                                        <td class="px-4 py-3 font-mono text-gray-300" x-text="formatCents(trade.paper_entry_price != null ? trade.paper_entry_price : trade.entry_price)"></td>
                                         <td class="px-4 py-3 font-mono font-bold">
-                                            <span x-show="trade.live_status === 'FILLED'" class="text-emerald-400" x-text="trade.live_entry_price != null ? ((trade.live_entry_price * 100).toFixed(0) + '¢') : '—'"></span>
-                                            <span x-show="trade.live_status === 'GTD_OPEN'" class="text-amber-400 animate-pulse text-xs" x-text="trade.live_limit_price != null ? ((trade.live_limit_price * 100).toFixed(0) + '¢ (GTD)') : 'GTD'"></span>
+                                            <span x-show="trade.live_status === 'FILLED'" class="text-emerald-400" x-text="formatCents(trade.live_entry_price)"></span>
+                                            <span x-show="trade.live_status === 'GTD_OPEN'" class="text-amber-400 animate-pulse text-xs" x-text="trade.live_limit_price != null ? (formatCents(trade.live_limit_price) + ' (GTD)') : 'GTD'"></span>
                                             <span x-show="trade.live_status === 'FILLING'" class="text-amber-400 animate-pulse text-xs" x-text="'Filling (#' + (trade.live_attempts || 1) + ')…'"></span>
                                             <span x-show="trade.live_status === 'NO_CREDS'" class="text-gray-500 text-xs">No Key</span>
                                             <span x-show="trade.live_status !== 'FILLED' && trade.live_status !== 'GTD_OPEN' && trade.live_status !== 'FILLING' && trade.live_status !== 'NO_CREDS'" class="text-gray-500 text-xs" x-text="trade.live_status || '—'"></span>
@@ -307,7 +307,7 @@
                                 <template x-for="trade in tradeHistory" :key="trade.trade_id || trade.paper_entry_time || trade.entry_time">
                                     <tr class="border-t border-gray-700 hover:bg-gray-700/30 transition">
                                         <td class="px-4 py-3 truncate max-w-[150px] sm:max-w-[180px]" x-text="trade.market_slug"></td>
-                                        <td class="px-4 py-3 font-bold" :class="trade.side === 'UP' ? 'text-green-400' : 'text-red-400'" x-text="trade.side"></td>
+                                        <td class="px-4 py-3 font-bold" :class="trade.side === 'UP' ? 'text-green-400' : 'text-red-400'" x-text="trade.side + (trade.kind === 'longshot' ? (trade.open_reason === 'longshot_maker' ? ' · LS maker' : ' · LS') : '')"></td>
                                         <td class="px-4 py-3 font-mono text-gray-300">
                                             <span x-text="formatCents(trade.paper_entry_price != null ? trade.paper_entry_price : trade.entry_price)"></span>
                                             <span class="text-gray-500">/</span>
@@ -563,7 +563,7 @@
                     };
                     const line = (t) => [
                         t.market_slug, t.market_id, t.side,
-                        t.open_reason === 'flip_entry' ? 'FLIP' : 'EV',
+                        t.kind === 'longshot' ? (t.open_reason === 'longshot_maker' ? 'LONGSHOT_MAKER' : 'LONGSHOT') : (t.open_reason === 'flip_entry' ? 'FLIP' : 'EV'),
                         t.paper_entry_price ?? t.entry_price,
                         t.live_entry_price ?? '',
                         t.amount,
@@ -627,7 +627,8 @@
                     if (val == null || val === '') return '—';
                     const n = Number(val);
                     if (isNaN(n)) return '—';
-                    return (n * 100).toFixed(0) + '¢';
+                    // PATCH: longshot — one decimal below 4¢ / above 96¢ (0.1¢ ticks there)
+                    return (n * 100).toFixed((n < 0.04 || n > 0.96) && Math.abs(n * 1000 - Math.round(n * 100) * 10) > 1e-6 ? 1 : 0) + '¢';
                 },
                 formatTimeOnly(iso) {
                     if (!iso) return '—';

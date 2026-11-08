@@ -4,8 +4,10 @@ use k256::ecdsa::SigningKey;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use sha2::Sha256;
-use std::sync::{Mutex, OnceLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tiny_keccak::{Hasher, Keccak};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -111,6 +113,10 @@ struct RustClobState {
     eoa_bytes: [u8; 20],
     funder_checksum: String,
     funder_bytes: [u8; 20],
+    // Address written into order.signer. Types 0/1/2: always the EOA.
+    // Type 3: the deposit wallet by default; Python can switch it (set_signer).
+    signer_checksum: String,
+    signer_bytes: [u8; 20],
     signature_type: u8,
     chain_id: u64,
     api_key: String,
@@ -160,15 +166,11 @@ fn build_signed_order_internal(
         (frac * (timestamp_ms as f64)) as u64
     });
 
-    // Polymarket CLOB V2 rule:
-    // For Deposit Wallets (signature_type == 3 / POLY_1271), the verifying contract is the
-    // deposit wallet itself; Polymarket requires order.signer to match the deposit wallet contract (st.funder).
-    // For direct EOA (0), Poly proxy (1), or Safe (2), order.signer is the EOA (st.eoa_checksum).
-    let (signer_bytes, signer_checksum) = if st.signature_type == 3 {
-        (&st.funder_bytes, &st.funder_checksum)
-    } else {
-        (&st.eoa_bytes, &st.eoa_checksum)
-    };
+    // order.signer comes from the state (see init_client / set_signer):
+    // types 0/1/2 -> the EOA; type 3 -> the deposit wallet (Polymarket docs) or,
+    // if Python switched it, the EOA.
+    let signer_bytes = &st.signer_bytes;
+    let signer_checksum = &st.signer_checksum;
 
     let token_id_be = parse_u256_be(token_id)?;
 
@@ -288,8 +290,35 @@ fn build_l2_hmac(secret_bytes: &[u8], timestamp_sec: &str, method: &str, path: &
     Ok(URL_SAFE.encode(result))
 }
 
+/// The order signer actually used: always the EOA for types 0/1/2; for type 3 the
+/// requested address (EOA or deposit wallet), defaulting to the deposit wallet.
+fn resolve_signer(
+    signature_type: u8,
+    requested: &str,
+    eoa_bytes: &[u8; 20],
+    funder_bytes: &[u8; 20],
+) -> Result<[u8; 20], String> {
+    if signature_type != 3 {
+        return Ok(*eoa_bytes);
+    }
+    let req = requested.trim();
+    if req.is_empty() {
+        return Ok(*funder_bytes);
+    }
+    let b = parse_address(req)?;
+    if b != *eoa_bytes && b != *funder_bytes {
+        return Err(format!(
+            "signer must be the EOA {} or the deposit wallet {}, got {}",
+            to_checksum_address(eoa_bytes),
+            to_checksum_address(funder_bytes),
+            req
+        ));
+    }
+    Ok(b)
+}
+
 #[pyfunction]
-#[pyo3(signature = (private_key, funder_address, signature_type, api_key, api_secret, api_passphrase, base_url="https://clob.polymarket.com", chain_id=137))]
+#[pyo3(signature = (private_key, funder_address, signature_type, api_key, api_secret, api_passphrase, base_url="https://clob.polymarket.com", chain_id=137, signer_address=""))]
 fn init_client(
     private_key: &str,
     funder_address: &str,
@@ -299,6 +328,7 @@ fn init_client(
     api_passphrase: &str,
     base_url: &str,
     chain_id: u64,
+    signer_address: &str,
 ) -> PyResult<bool> {
     let clean_pk = private_key.trim().strip_prefix("0x").or_else(|| private_key.trim().strip_prefix("0X")).unwrap_or(private_key.trim());
     let pk_bytes = hex::decode(clean_pk).map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid private key hex: {}", e)))?;
@@ -313,6 +343,9 @@ fn init_client(
 
     let funder_bytes = parse_address(funder_address).map_err(pyo3::exceptions::PyValueError::new_err)?;
     let funder_checksum = to_checksum_address(&funder_bytes);
+    let signer_bytes = resolve_signer(signature_type, signer_address, &eoa_bytes, &funder_bytes)
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    let signer_checksum = to_checksum_address(&signer_bytes);
 
     let api_secret_bytes = URL_SAFE
         .decode(api_secret.trim())
@@ -347,6 +380,8 @@ fn init_client(
         eoa_bytes,
         funder_checksum,
         funder_bytes,
+        signer_checksum,
+        signer_bytes,
         signature_type,
         chain_id,
         api_key: api_key.trim().to_string(),
@@ -365,6 +400,8 @@ fn init_client(
 
     let mut guard = get_state_mutex().lock().unwrap();
     *guard = Some(state);
+    drop(guard);
+    let _ = sender(); // start the order sender threads now, not on the first order
     Ok(true)
 }
 
@@ -372,6 +409,32 @@ fn init_client(
 fn is_initialized() -> bool {
     let guard = get_state_mutex().lock().unwrap();
     guard.is_some()
+}
+
+/// Switch order.signer without re-initialising. "" = default (deposit wallet for
+/// type 3). Types 0/1/2 always stay on the EOA. Returns the signer now in use.
+#[pyfunction]
+fn set_signer(signer_address: &str) -> PyResult<String> {
+    let mut guard = get_state_mutex().lock().unwrap();
+    let st = guard.as_mut().ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("rust_clob not initialized"))?;
+    let b = resolve_signer(st.signature_type, signer_address, &st.eoa_bytes, &st.funder_bytes)
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    st.signer_bytes = b;
+    st.signer_checksum = to_checksum_address(&b);
+    Ok(st.signer_checksum.clone())
+}
+
+/// What the next order will carry: EOA (POLY_ADDRESS header), maker, signer, type.
+#[pyfunction]
+fn get_identity(py: Python<'_>) -> PyResult<PyObject> {
+    let guard = get_state_mutex().lock().unwrap();
+    let st = guard.as_ref().ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("rust_clob not initialized"))?;
+    let dict = PyDict::new_bound(py);
+    dict.set_item("eoa", st.eoa_checksum.clone())?;
+    dict.set_item("maker", st.funder_checksum.clone())?;
+    dict.set_item("signer", st.signer_checksum.clone())?;
+    dict.set_item("signature_type", st.signature_type)?;
+    Ok(dict.into())
 }
 
 #[pyfunction]
@@ -428,10 +491,22 @@ fn build_signed_order(
     Ok(dict.into())
 }
 
-#[pyfunction]
-#[pyo3(signature = (token_id, maker_amount, taker_amount, side, order_type="FAK", expiration="0", neg_risk=false, post_only=false, defer_exec=false))]
-fn post_order(
-    py: Python<'_>,
+/// A signed order, ready to send.
+struct PreparedPost {
+    agent: ureq::Agent,
+    url: String,
+    eoa_checksum: String,
+    api_key: String,
+    api_passphrase: String,
+    ts_sec: String,
+    hmac_sig: String,
+    body: String,
+    sign_us: u64,
+    t0: Instant,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_post(
     token_id: &str,
     maker_amount: u64,
     taker_amount: u64,
@@ -441,79 +516,79 @@ fn post_order(
     neg_risk: bool,
     post_only: bool,
     defer_exec: bool,
-) -> PyResult<PyObject> {
+) -> PyResult<PreparedPost> {
     let t0 = Instant::now();
+    // Sign inside the lock (~40 microseconds); the network part runs without it.
+    let guard = get_state_mutex().lock().unwrap();
+    let st = guard.as_ref().ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("rust_clob not initialized"))?;
 
-    // Clone lightweight handles & sign inside lock (~40 microseconds), then release lock & GIL for network I/O
-    let (agent, url, eoa_checksum, api_key, api_passphrase, ts_sec, hmac_sig, body, sign_us) = {
-        let guard = get_state_mutex().lock().unwrap();
-        let st = guard.as_ref().ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("rust_clob not initialized"))?;
+    let (body, _sig) = build_signed_order_internal(
+        st,
+        token_id,
+        maker_amount,
+        taker_amount,
+        side,
+        expiration,
+        neg_risk,
+        order_type,
+        post_only,
+        defer_exec,
+        None,
+        None,
+    )
+    .map_err(pyo3::exceptions::PyValueError::new_err)?;
 
-        let (body, _sig) = build_signed_order_internal(
-            st,
-            token_id,
-            maker_amount,
-            taker_amount,
-            side,
-            expiration,
-            neg_risk,
-            order_type,
-            post_only,
-            defer_exec,
-            None,
-            None,
-        )
+    let ts_sec = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .to_string();
+    let hmac_sig = build_l2_hmac(&st.api_secret_bytes, &ts_sec, "POST", "/order", &body)
         .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    let sign_us = t0.elapsed().as_micros() as u64;
 
-        let ts_sec = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            .to_string();
-        let hmac_sig = build_l2_hmac(&st.api_secret_bytes, &ts_sec, "POST", "/order", &body)
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
-        let sign_us = t0.elapsed().as_micros() as u64;
+    Ok(PreparedPost {
+        agent: st.agent.clone(),
+        url: format!("{}/order", st.base_url),
+        eoa_checksum: st.eoa_checksum.clone(),
+        api_key: st.api_key.clone(),
+        api_passphrase: st.api_passphrase.clone(),
+        ts_sec,
+        hmac_sig,
+        body,
+        sign_us,
+        t0,
+    })
+}
 
-        (
-            st.agent.clone(),
-            format!("{}/order", st.base_url),
-            st.eoa_checksum.clone(),
-            st.api_key.clone(),
-            st.api_passphrase.clone(),
-            ts_sec,
-            hmac_sig,
-            body,
-            sign_us,
-        )
-    };
+/// HTTP POST of a signed order over the agent's pooled keep-alive connection.
+fn send_prepared(p: &PreparedPost) -> Result<(u16, String), String> {
+    let resp = p
+        .agent
+        .post(&p.url)
+        .set("POLY_ADDRESS", &p.eoa_checksum)
+        .set("POLY_SIGNATURE", &p.hmac_sig)
+        .set("POLY_TIMESTAMP", &p.ts_sec)
+        .set("POLY_API_KEY", &p.api_key)
+        .set("POLY_PASSPHRASE", &p.api_passphrase)
+        .set("Content-Type", "application/json")
+        .send_bytes(p.body.as_bytes());
 
-    // Release Python GIL while executing HTTP POST over pre-warmed connection pool
-    let net_res = py.allow_threads(move || {
-        let resp = agent
-            .post(&url)
-            .set("POLY_ADDRESS", &eoa_checksum)
-            .set("POLY_SIGNATURE", &hmac_sig)
-            .set("POLY_TIMESTAMP", &ts_sec)
-            .set("POLY_API_KEY", &api_key)
-            .set("POLY_PASSPHRASE", &api_passphrase)
-            .set("Content-Type", "application/json")
-            .send_bytes(body.as_bytes());
-
-        match resp {
-            Ok(r) => {
-                let status = r.status();
-                let text = r.into_string().unwrap_or_default();
-                Ok((status, text))
-            }
-            Err(ureq::Error::Status(code, r)) => {
-                let text = r.into_string().unwrap_or_default();
-                Ok((code, text))
-            }
-            Err(ureq::Error::Transport(t)) => Err(format!("TransportError: {}", t)),
+    match resp {
+        Ok(r) => {
+            let status = r.status();
+            let text = r.into_string().unwrap_or_default();
+            Ok((status, text))
         }
-    });
+        Err(ureq::Error::Status(code, r)) => {
+            let text = r.into_string().unwrap_or_default();
+            Ok((code, text))
+        }
+        Err(ureq::Error::Transport(t)) => Err(format!("TransportError: {}", t)),
+    }
+}
 
-    let total_us = t0.elapsed().as_micros() as u64;
+fn result_dict(py: Python<'_>, sign_us: u64, total_us: u64, net_res: Result<(u16, String), String>) -> PyResult<PyObject> {
     let dict = PyDict::new_bound(py);
     dict.set_item("sign_time_us", sign_us)?;
     dict.set_item("total_time_us", total_us)?;
@@ -531,7 +606,174 @@ fn post_order(
             dict.set_item("transport_error", err_str)?;
         }
     }
+    Ok(dict.into())
+}
 
+#[pyfunction]
+#[pyo3(signature = (token_id, maker_amount, taker_amount, side, order_type="FAK", expiration="0", neg_risk=false, post_only=false, defer_exec=false))]
+#[allow(clippy::too_many_arguments)]
+fn post_order(
+    py: Python<'_>,
+    token_id: &str,
+    maker_amount: u64,
+    taker_amount: u64,
+    side: u8,
+    order_type: &str,
+    expiration: &str,
+    neg_risk: bool,
+    post_only: bool,
+    defer_exec: bool,
+) -> PyResult<PyObject> {
+    let p = prepare_post(token_id, maker_amount, taker_amount, side, order_type, expiration, neg_risk, post_only, defer_exec)?;
+    // Release Python GIL while executing HTTP POST over pre-warmed connection pool
+    let (sign_us, t0) = (p.sign_us, p.t0);
+    let net_res = py.allow_threads(move || send_prepared(&p));
+    let total_us = t0.elapsed().as_micros() as u64;
+    result_dict(py, sign_us, total_us, net_res)
+}
+
+// ── Sending without a Python thread ─────────────────────────────────────────────
+// post_order_async() signs on the calling thread and hands the HTTP request to one of
+// these Rust threads, so the order leaves without waiting for a Python worker thread or
+// the GIL. post_order_wait() collects the answer.
+struct SendJob {
+    id: u64,
+    prep: PreparedPost,
+}
+
+struct SendDone {
+    sign_us: u64,
+    total_us: u64,
+    res: Result<(u16, String), String>,
+}
+
+const SENDER_THREADS: usize = 4;
+static NEXT_SEND_ID: AtomicU64 = AtomicU64::new(1);
+static SEND_TX: OnceLock<Mutex<mpsc::Sender<SendJob>>> = OnceLock::new();
+static SEND_DONE: OnceLock<(Mutex<HashMap<u64, SendDone>>, Condvar)> = OnceLock::new();
+
+fn send_done() -> &'static (Mutex<HashMap<u64, SendDone>>, Condvar) {
+    SEND_DONE.get_or_init(|| (Mutex::new(HashMap::new()), Condvar::new()))
+}
+
+fn sender() -> &'static Mutex<mpsc::Sender<SendJob>> {
+    SEND_TX.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<SendJob>();
+        let rx = Arc::new(Mutex::new(rx));
+        for i in 0..SENDER_THREADS {
+            let rx = rx.clone();
+            let _ = std::thread::Builder::new()
+                .name(format!("rust_clob-send-{}", i))
+                .spawn(move || loop {
+                    let job = {
+                        let r = rx.lock().unwrap();
+                        r.recv()
+                    };
+                    let job = match job {
+                        Ok(j) => j,
+                        Err(_) => break,
+                    };
+                    let res = send_prepared(&job.prep);
+                    let total_us = job.prep.t0.elapsed().as_micros() as u64;
+                    let (m, cv) = send_done();
+                    let mut done = m.lock().unwrap();
+                    if done.len() > 256 {
+                        done.clear(); // answers nobody collected (shouldn't happen)
+                    }
+                    done.insert(job.id, SendDone { sign_us: job.prep.sign_us, total_us, res });
+                    cv.notify_all();
+                });
+        }
+        Mutex::new(tx)
+    })
+}
+
+/// Sign now and start sending on a Rust thread. Returns a ticket for post_order_wait().
+#[pyfunction]
+#[pyo3(signature = (token_id, maker_amount, taker_amount, side, order_type="FAK", expiration="0", neg_risk=false, post_only=false, defer_exec=false))]
+#[allow(clippy::too_many_arguments)]
+fn post_order_async(
+    token_id: &str,
+    maker_amount: u64,
+    taker_amount: u64,
+    side: u8,
+    order_type: &str,
+    expiration: &str,
+    neg_risk: bool,
+    post_only: bool,
+    defer_exec: bool,
+) -> PyResult<u64> {
+    let prep = prepare_post(token_id, maker_amount, taker_amount, side, order_type, expiration, neg_risk, post_only, defer_exec)?;
+    let id = NEXT_SEND_ID.fetch_add(1, Ordering::Relaxed);
+    sender()
+        .lock()
+        .unwrap()
+        .send(SendJob { id, prep })
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("order sender stopped: {}", e)))?;
+    Ok(id)
+}
+
+/// The answer to a post_order_async() ticket (same dict as post_order). Waits up to
+/// timeout_s without holding the GIL.
+#[pyfunction]
+#[pyo3(signature = (ticket, timeout_s=30.0))]
+fn post_order_wait(py: Python<'_>, ticket: u64, timeout_s: f64) -> PyResult<PyObject> {
+    let done = py.allow_threads(move || {
+        let (m, cv) = send_done();
+        let deadline = Instant::now() + Duration::from_secs_f64(timeout_s.max(0.0));
+        let mut map = m.lock().unwrap();
+        loop {
+            if let Some(d) = map.remove(&ticket) {
+                return Some(d);
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return None;
+            }
+            map = cv.wait_timeout(map, deadline - now).unwrap().0;
+        }
+    });
+    match done {
+        Some(d) => result_dict(py, d.sign_us, d.total_us, d.res),
+        None => result_dict(py, 0, 0, Err("TransportError: no answer from the order sender in time".to_string())),
+    }
+}
+
+/// A small GET over the order connection (default: the server time), so the connection is
+/// open when the next order goes out (an idle one gets closed by the server, and opening a
+/// new one costs DNS, TCP and TLS round trips).
+#[pyfunction]
+#[pyo3(signature = (path="/time"))]
+fn warm_connection(py: Python<'_>, path: &str) -> PyResult<PyObject> {
+    let (agent, url) = {
+        let guard = get_state_mutex().lock().unwrap();
+        let st = guard.as_ref().ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("rust_clob not initialized"))?;
+        (st.agent.clone(), format!("{}{}", st.base_url, path))
+    };
+    let t0 = Instant::now();
+    let res = py.allow_threads(move || match agent.get(&url).call() {
+        Ok(r) => {
+            let s = r.status();
+            let _ = r.into_string();
+            Ok(s)
+        }
+        Err(ureq::Error::Status(code, r)) => {
+            let _ = r.into_string();
+            Ok(code)
+        }
+        Err(ureq::Error::Transport(t)) => Err(format!("TransportError: {}", t)),
+    });
+    let dict = PyDict::new_bound(py);
+    dict.set_item("total_time_us", t0.elapsed().as_micros() as u64)?;
+    match res {
+        Ok(s) => {
+            dict.set_item("http_status", s)?;
+        }
+        Err(e) => {
+            dict.set_item("http_status", 0)?;
+            dict.set_item("transport_error", e)?;
+        }
+    }
     Ok(dict.into())
 }
 
@@ -539,8 +781,13 @@ fn post_order(
 fn rust_clob(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(init_client, m)?)?;
     m.add_function(wrap_pyfunction!(is_initialized, m)?)?;
+    m.add_function(wrap_pyfunction!(set_signer, m)?)?;
+    m.add_function(wrap_pyfunction!(get_identity, m)?)?;
     m.add_function(wrap_pyfunction!(build_signed_order, m)?)?;
     m.add_function(wrap_pyfunction!(post_order, m)?)?;
+    m.add_function(wrap_pyfunction!(post_order_async, m)?)?;
+    m.add_function(wrap_pyfunction!(post_order_wait, m)?)?;
+    m.add_function(wrap_pyfunction!(warm_connection, m)?)?;
     Ok(())
 }
 

@@ -90,7 +90,9 @@ def fair_prob_up(current_price: float, strike: float, steps: int,
     """
     if not current_price or not strike or current_price <= 0 or strike <= 0:
         return 0.5
-    n = max(1, int(steps))
+    # PATCH: longshot — a float `steps` (settings model.time_mode = "exact") is used as-is,
+    # so 40 seconds left is 0.133 steps. An int keeps the original whole-step clock.
+    n = max(float(steps), 1e-4) if isinstance(steps, float) else max(1, int(steps))
     if sigma_per_step is None or sigma_per_step <= 0:
         return 1.0 if current_price > strike else 0.0
     mu = (drift_per_step - 0.5 * sigma_per_step ** 2) * n
