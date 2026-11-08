@@ -115,206 +115,65 @@
 
             <!-- Long shots (PATCH: longshot) -->
             <div class="bg-gray-800 p-5 sm:p-6 rounded-lg shadow-lg">
-                <h2 class="text-lg sm:text-xl font-bold mb-4 border-b border-gray-700 pb-2">Long Shots</h2>
-                <div class="flex flex-wrap gap-6 mb-4">
-                    <label class="flex items-center gap-2">
-                        <input type="checkbox" x-model="form.longshot.enabled" class="w-4 h-4">
-                        <span class="text-sm font-bold text-amber-400 uppercase">Enable long shots</span>
-                    </label>
-                    <label class="flex items-center gap-2">
-                        <input type="checkbox" x-model="form.longshot.live" class="w-4 h-4">
-                        <span class="text-sm font-bold text-gray-300 uppercase">Place live orders</span>
-                    </label>
-                </div>
-                <p class="text-[10px] text-gray-500 mb-4 italic">A second entry path for the end of the window, with its own slot, stake and price cap. It can trade in a window where the regular strategy already has a position. Unticking "Place live orders" keeps long shots paper-only. Prices are in dollars per share: 0.03 = 3¢.</p>
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6" :class="form.longshot.enabled ? '' : 'opacity-50'">
+                <h2 class="text-lg sm:text-xl font-bold mb-4 border-b border-gray-700 pb-2">Long Shots (Final Minute)</h2>
+                <p class="text-xs text-gray-400 mb-4">Trades low-priced outcome shares in the final minute of the candle window using standard GTD limit orders. Sizing derives strictly from primary risk settings.</p>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 mb-6">
                     <div>
-                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Model</label>
-                        <select x-model="form.longshot.model" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
-                            <option value="twap">twap: settlement price vs price to beat, 60 s average</option>
-                            <option value="exact">exact: bot model, real time left</option>
-                            <option value="regular">regular: same number as the regular strategy</option>
-                        </select>
-                        <p class="text-[10px] text-gray-500 mt-2 italic">twap reads the settlement feed and the price to beat; exact and regular read Binance against the window's Binance open.</p>
+                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Stake sizing</label>
+                        <input type="text" value="Risk Value / Type (Primary Bot Settings)" readonly disabled class="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-gray-300 font-mono text-sm cursor-not-allowed">
+                        <p class="text-[10px] text-gray-500 mt-2 italic">Uses the primary bot risk value and risk type at all times.</p>
                     </div>
 
                     <div>
-                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Price to beat (twap model)</label>
-                        <select x-model="form.longshot.price_to_beat" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
-                            <option value="sampled_twap">sampled_twap: bot's own 60 s average at the open</option>
-                            <option value="bot_strike">bot_strike: the bot's single opening price</option>
-                        </select>
-                        <p class="text-[10px] text-gray-500 mt-2 italic">sampled_twap needs the bot running in the minute before the window opens; otherwise it uses bot_strike.</p>
-                    </div>
-
-                    <div>
-                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Stake type</label>
-                        <select x-model="form.longshot.stake_type" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
-                            <option value="fixed">Fixed ($)</option>
-                            <option value="percent">Percent of balance (%)</option>
-                            <option value="growth">Growth-max share of balance, capped</option>
-                        </select>
-                        <p class="text-[10px] text-gray-500 mt-2 italic">Growth-max stakes (chance − price) ÷ (1 − price) of the balance, never more than the cap below.</p>
-                    </div>
-
-                    <div>
-                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Stake value</label>
-                        <input type="number" step="0.01" min="0" x-model.number="form.longshot.stake_value" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
-                        <p class="text-[10px] text-gray-500 mt-2 italic">Dollars (fixed) or % of balance (percent); growth doesn't use it. Orders are at least 5 whole shares and at least $1.</p>
-                    </div>
-
-                    <div>
-                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Growth-max cap (% of balance)</label>
-                        <input type="number" step="1" min="0" max="100" x-model.number="form.longshot.growth_cap_pct" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
-                        <p class="text-[10px] text-gray-500 mt-2 italic">Growth stakes never go above this share of the balance.</p>
+                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Order execution</label>
+                        <input type="text" value="GTD (Good 'Til Date limit order)" readonly disabled class="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-gray-300 font-mono text-sm cursor-not-allowed">
+                        <p class="text-[10px] text-gray-500 mt-2 italic">Uses the same GTD limit order, retries, and slippage as the copier.</p>
                     </div>
 
                     <div>
                         <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Max long shots per window</label>
                         <input type="number" step="1" min="0" x-model.number="form.longshot.max_per_window" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
-                        <p class="text-[10px] text-gray-500 mt-2 italic">0 = none. The regular strategy's slot is separate.</p>
+                        <p class="text-[10px] text-gray-500 mt-2 italic">Maximum long-shot trades to enter per candle window.</p>
                     </div>
 
                     <div>
-                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Cutoff (seconds before close)</label>
-                        <input type="number" step="0.5" min="0" x-model.number="form.longshot.cutoff_s" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
-                        <p class="text-[10px] text-gray-500 mt-2 italic">No new long shots in the last N seconds.</p>
+                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Look window (seconds before close)</label>
+                        <input type="number" step="5" min="10" max="300" x-model.number="form.longshot.look_s" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
+                        <p class="text-[10px] text-gray-500 mt-2 italic">Final seconds of the candle window when long shots evaluate.</p>
                     </div>
-
-                    <div>
-                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Min ask liquidity ($)</label>
-                        <input type="number" step="0.5" min="0" x-model.number="form.longshot.min_ask_liquidity_usd" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
-                        <p class="text-[10px] text-gray-500 mt-2 italic">Dollars resting in the top 5 ask levels of that side.</p>
-                    </div>
-
-                    <div>
-                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Slippage</label>
-                        <input type="number" step="0.001" min="0" x-model.number="form.longshot.slippage" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
-                        <p class="text-[10px] text-gray-500 mt-2 italic">Limit = ask + this, never above the band's max price.</p>
-                    </div>
-
-                    <div>
-                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Order type</label>
-                        <select x-model="form.longshot.order_type" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
-                            <option value="FAK">FAK: fill-and-kill, buys what's offered up to the limit at once</option>
-                            <option value="GTD">GTD: rests on the book, then cancel and re-quote</option>
-                        </select>
-                        <p class="text-[10px] text-gray-500 mt-2 italic">FAK leaves nothing on the book; what isn't offered at or below the limit is cancelled straight away.</p>
-                    </div>
-
-                    <div>
-                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Max order attempts</label>
-                        <input type="number" step="1" min="1" max="50" x-model.number="form.longshot.max_attempts" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
-                        <p class="text-[10px] text-gray-500 mt-2 italic">FAK: more orders for what's still unbought, while the ask stays under the cap. GTD: re-quotes.</p>
-                    </div>
-
-                    <div>
-                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Resting time (s)</label>
-                        <input type="number" step="0.5" min="0.2" x-model.number="form.longshot.resting_s" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
-                        <p class="text-[10px] text-gray-500 mt-2 italic">GTD only: how long a resting order waits before it is cancelled and re-quoted.</p>
-                    </div>
-
-                    <div>
-                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Max price age (s)</label>
-                        <input type="number" step="0.5" min="0.1" x-model.number="form.longshot.max_price_age_s" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
-                        <p class="text-[10px] text-gray-500 mt-2 italic">twap model: skip if the settlement price is older than this.</p>
-                    </div>
-
-                    <div>
-                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">When several bands fire</label>
-                        <select x-model="form.longshot.pick" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
-                            <option value="multiple">Highest chance ÷ ask</option>
-                            <option value="ev">Highest chance − ask</option>
-                        </select>
-                    </div>
-
-                    <div>
-                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Volatility ($ per √s)</label>
-                        <input type="number" step="0.1" min="0" x-model.number="form.longshot.vol_usd_per_sqrt_s" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
-                        <p class="text-[10px] text-gray-500 mt-2 italic">0 = from the 5-minute candles. Fixed value overrides.</p>
-                    </div>
-
-                    <div>
-                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Fallback volatility ($ per √s)</label>
-                        <input type="number" step="0.1" min="0" x-model.number="form.longshot.vol_fallback_usd_per_sqrt_s" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
-                        <p class="text-[10px] text-gray-500 mt-2 italic">Used when the candles give nothing.</p>
-                    </div>
-
-                    <div>
-                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Uncertainty floor ($)</label>
-                        <input type="number" step="0.1" min="0" x-model.number="form.longshot.sd_floor_usd" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
-                        <p class="text-[10px] text-gray-500 mt-2 italic">twap model: smallest standard deviation allowed for the closing average.</p>
-                    </div>
-
-                    <div>
-                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Taker fee rate</label>
-                        <input type="number" step="0.01" min="0" max="0.5" x-model.number="form.longshot.taker_fee_rate" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
-                        <p class="text-[10px] text-gray-500 mt-2 italic">Polymarket's crypto taker fee (0.07): shares × rate × price × (1 − price), about 6.9% of the stake at 1¢. The bands' chance ÷ ask and chance − ask use the ask plus this fee. 0 = ignore fees. Maker bids pay none.</p>
-                    </div>
-
                 </div>
-                <template x-for="name in Object.keys(form.longshot.bands || {})" :key="name">
-                    <div class="mt-5 border border-gray-700 rounded-lg p-4" :class="(form.longshot.enabled && form.longshot.bands[name].enabled) ? '' : 'opacity-50'">
-                        <label class="flex items-center gap-2 mb-3">
-                            <input type="checkbox" x-model="form.longshot.bands[name].enabled" class="w-4 h-4">
-                            <span class="text-sm font-bold text-gray-200 uppercase" x-text="'Band: ' + name"></span>
-                        </label>
-                        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-                            <div><label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Look (last s)</label><input type="number" step="1" min="0" x-model.number="form.longshot.bands[name].look_s" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition"></div>
-                            <div><label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Ask min</label><input type="number" step="0.001" min="0" max="1" x-model.number="form.longshot.bands[name].ask_min" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition"></div>
-                            <div><label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Ask max</label><input type="number" step="0.001" min="0" max="1" x-model.number="form.longshot.bands[name].ask_max" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition"></div>
-                            <div><label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Max price</label><input type="number" step="0.001" min="0" max="1" x-model.number="form.longshot.bands[name].max_price" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition"></div>
-                            <div><label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Min chance</label><input type="number" step="0.01" min="0" max="1" x-model.number="form.longshot.bands[name].min_prob" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition"></div>
-                            <div><label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Min chance ÷ ask</label><input type="number" step="0.5" min="0" x-model.number="form.longshot.bands[name].min_multiple" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition"></div>
+
+                <!-- 1¢–3¢ Asymmetric Sniper Band -->
+                <div class="mt-4 border border-gray-700 rounded-lg p-4 bg-gray-750">
+                    <span class="text-sm font-bold text-gray-200 uppercase tracking-wider block mb-3">1¢–3¢ Asymmetric Sniper Band</span>
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div>
+                            <label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Ask min ($)</label>
+                            <input type="number" step="0.001" min="0.001" max="1" x-model.number="form.longshot.bands.final.ask_min" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
                         </div>
-                        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3">
-                            <div><label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Band stake</label>
-                                <select x-model="form.longshot.bands[name].stake_type" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
-                                    <option value="">Use the long-shot stake</option>
-                                    <option value="fixed">Fixed ($)</option>
-                                    <option value="percent">% of balance</option>
-                                    <option value="growth">Growth-max, capped</option>
-                                </select></div>
-                            <div x-show="form.longshot.bands[name].stake_type === 'fixed' || form.longshot.bands[name].stake_type === 'percent'"><label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Band stake value</label><input type="number" step="0.01" min="0" x-model.number="form.longshot.bands[name].stake_value" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition"></div>
-                            <div x-show="form.longshot.bands[name].stake_type === 'growth'"><label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Band growth cap (%)</label><input type="number" step="1" min="0" max="100" placeholder="long-shot cap" x-model.number="form.longshot.bands[name].growth_cap_pct" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition"></div>
+                        <div>
+                            <label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Ask max ($)</label>
+                            <input type="number" step="0.001" min="0.001" max="1" x-model.number="form.longshot.bands.final.ask_max" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
                         </div>
-                        <p class="text-[10px] text-gray-500 mt-2 italic">Fires when the ask is between ask min and ask max, inside the last "look" seconds, and the side's chance passes both gates (0 = gate off). A band stake replaces the long-shot stake for this band only.</p>
+                        <div>
+                            <label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Max limit cap ($)</label>
+                            <input type="number" step="0.001" min="0.001" max="1" x-model.number="form.longshot.bands.final.max_price" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
+                        </div>
                     </div>
-                </template>
-                <!-- Maker bids (PATCH: longshot maker) -->
-                <div class="mt-5 border border-gray-700 rounded-lg p-4" :class="(form.longshot.enabled && form.longshot.maker.enabled) ? '' : 'opacity-50'">
-                    <div class="flex flex-wrap gap-6 mb-3">
-                        <label class="flex items-center gap-2">
-                            <input type="checkbox" x-model="form.longshot.maker.enabled" class="w-4 h-4">
-                            <span class="text-sm font-bold text-gray-200 uppercase">Maker bids (resting, no taker fee)</span>
-                        </label>
-                        <label class="flex items-center gap-2">
-                            <input type="checkbox" x-model="form.longshot.maker.live" class="w-4 h-4">
-                            <span class="text-sm font-bold text-gray-300 uppercase">Live maker orders</span>
-                        </label>
+                    <p class="text-[10px] text-gray-500 mt-2 italic">Triggers when an ask appears in the sniper range (default 1¢–3¢, capped at 4¢).</p>
+                </div>
+
+                <!-- Resting Maker Bids -->
+                <div class="mt-4 border border-gray-700 rounded-lg p-4 bg-gray-750">
+                    <span class="text-sm font-bold text-gray-200 uppercase tracking-wider block mb-3">Resting Maker Bids (0% Fee + Rebate)</span>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                            <label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Bid price ($)</label>
+                            <input type="number" step="0.001" min="0.001" max="0.5" x-model.number="form.longshot.maker.price" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
+                        </div>
                     </div>
-                    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-                        <div><label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Bid price</label><input type="number" step="0.001" min="0.001" max="0.5" x-model.number="form.longshot.maker.price" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition"></div>
-                        <div><label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Min chance</label><input type="number" step="0.01" min="0" max="1" x-model.number="form.longshot.maker.min_prob" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition"></div>
-                        <div><label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Only while ask ≤</label><input type="number" step="0.01" min="0.001" max="1" x-model.number="form.longshot.maker.max_ask" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition"></div>
-                        <div><label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Look (last s)</label><input type="number" step="1" min="1" x-model.number="form.longshot.maker.look_s" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition"></div>
-                        <div><label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Cancel (s before close)</label><input type="number" step="0.5" min="0" x-model.number="form.longshot.maker.cutoff_s" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition"></div>
-                        <div><label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Max filled bids / window</label><input type="number" step="1" min="0" x-model.number="form.longshot.maker.max_fills_per_window" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition"></div>
-                        <div><label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Re-place at most every (s)</label><input type="number" step="0.5" min="0.2" x-model.number="form.longshot.maker.requote_s" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition"></div>
-                        <div><label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Live fill check every (s)</label><input type="number" step="0.5" min="0.2" x-model.number="form.longshot.maker.poll_s" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition"></div>
-                    </div>
-                    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3">
-                        <div><label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Maker stake</label>
-                            <select x-model="form.longshot.maker.stake_type" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
-                                <option value="">Use the long-shot stake</option>
-                                <option value="fixed">Fixed ($)</option>
-                                <option value="percent">% of balance</option>
-                                <option value="growth">Growth-max, capped</option>
-                            </select></div>
-                        <div x-show="form.longshot.maker.stake_type === 'fixed' || form.longshot.maker.stake_type === 'percent'"><label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Maker stake value</label><input type="number" step="0.01" min="0" x-model.number="form.longshot.maker.stake_value" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition"></div>
-                        <div x-show="form.longshot.maker.stake_type === 'growth'"><label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Maker growth cap (%)</label><input type="number" step="1" min="0" max="100" placeholder="long-shot cap" x-model.number="form.longshot.maker.growth_cap_pct" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition"></div>
-                    </div>
-                    <p class="text-[10px] text-gray-500 mt-2 italic">A post-only bid at the bid price (one tick under the ask when the ask is at or under it) on each side the model gives at least "min chance" while that side's ask is at or under "only while ask ≤", inside the last "look" seconds. It is cancelled when the chance falls 0.02 under min chance, the ask rises 5¢ over the limit, at the cancel time, or when the checks stop. Fills: sellers hitting it, or buyers of the other side at 1 − price. Paper unless "Place live orders" and "Live maker orders" are both ticked; paper fills count the book and trades as if the bid were first in line. Under 1¢ only rests while the ask is under 4¢ (0.1¢ steps). Bids with a fill count toward "max filled bids", the bands keep their own max.</p>
+                    <p class="text-[10px] text-gray-500 mt-2 italic">Places a resting GTD maker bid (default 1¢) in the final minute.</p>
                 </div>
             </div>
 
@@ -379,18 +238,6 @@
                         </label>
                     </div>
                 </div>
-                <h3 class="text-sm font-bold text-gray-200 uppercase mt-6 mb-3">Redeem sweep</h3>
-                <label class="flex items-center gap-2 mb-3">
-                    <input type="checkbox" x-model="form.redeem_sweep.enabled" class="w-4 h-4">
-                    <span class="text-xs font-bold text-emerald-400 uppercase">Redeem anything Polymarket lists as redeemable</span>
-                </label>
-                <div class="grid grid-cols-2 md:grid-cols-4 gap-3" :class="form.redeem_sweep.enabled ? '' : 'opacity-50'">
-                    <div><label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Every (s)</label><input type="number" step="30" min="30" x-model.number="form.redeem_sweep.interval_s" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition"></div>
-                    <div><label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Retry after (s)</label><input type="number" step="60" min="0" x-model.number="form.redeem_sweep.retry_after_s" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition"></div>
-                    <div><label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Max per sweep</label><input type="number" step="1" min="1" x-model.number="form.redeem_sweep.max_per_pass" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition"></div>
-                    <div><label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Min shares</label><input type="number" step="0.01" min="0" x-model.number="form.redeem_sweep.min_shares" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition"></div>
-                </div>
-                <p class="text-[10px] text-gray-500 mt-2 italic">Checks the trading wallet's redeemable positions on Polymarket's Data API and redeems them (needs the relayer API key). Catches wins the bot labelled wrongly or that settled while it was off.</p>
             </div>
 
             <!-- Auto-withdrawal (capital extractor) -->
@@ -878,23 +725,18 @@
                     flip: { enabled: false, min_conviction: 0.80, min_minutes_left: 9.0 },
                     capital_extractor: { enabled: false, trigger_balance: 2000, withdraw_amount: 1000, withdraw_address: '', auto_resume_after_withdrawal: true, resume_after: 'submitted', default_destination: '' },
                     telegram: { enabled: false, bot_token: '' },
-                    // PATCH: longshot — defaults until /api/settings answers
-                    longshot: { enabled: false, live: true, model: 'twap', price_to_beat: 'sampled_twap', pick: 'multiple',
-                                stake_type: 'fixed', stake_value: 1.0, growth_cap_pct: 30, max_per_window: 1, cutoff_s: 3.0,
-                                min_ask_liquidity_usd: 2.0, max_price_age_s: 3.0, slippage: 0.01, order_type: 'FAK', max_attempts: 3,
-                                resting_s: 4.0, vol_usd_per_sqrt_s: 0, vol_fallback_usd_per_sqrt_s: 6.0, sd_floor_usd: 3.0,
-                                taker_fee_rate: 0.07,  // PATCH: longshot maker
-                                maker: { enabled: false, live: false, price: 0.01, min_prob: 0.20, max_ask: 0.30, look_s: 60, cutoff_s: 3.0,
-                                         max_fills_per_window: 1, stake_type: '', stake_value: null, growth_cap_pct: null,
-                                         requote_s: 2.0, poll_s: 1.0 },
-                                bands: {
-                                    favored: { enabled: true, look_s: 60, ask_min: 0.07, ask_max: 0.10, max_price: 0.15, min_prob: 0.55, min_multiple: 0, stake_type: '', stake_value: null, growth_cap_pct: null },
-                                    final: { enabled: true, look_s: 60, ask_min: 0.01, ask_max: 0.03, max_price: 0.04, min_prob: 0, min_multiple: 10, stake_type: '', stake_value: null, growth_cap_pct: null }
-                                } },
+                    // Longshot — defaults until /api/settings answers
+                    longshot: {
+                        max_per_window: 1,
+                        look_s: 60,
+                        maker: { price: 0.01 },
+                        bands: {
+                            final: { ask_min: 0.01, ask_max: 0.03, max_price: 0.04 }
+                        }
+                    },
                     settlement: { mode: 'official', official_wait_s: 600, official_min_price: 0.99999, official_require_closed: true,
                                   fallback: 'sampled_twap', price_threshold: 0.9, authoritative_settle_wait_s: 90 },
-                    model: { time_mode: 'steps' },
-                    redeem_sweep: { enabled: true, interval_s: 300, retry_after_s: 900, max_per_pass: 10, min_shares: 0.01 }
+                    model: { time_mode: 'steps' }
                 },
                 message: '',
                 messageType: '',
@@ -943,7 +785,7 @@
                         ]);
                         for (const k of ['polymarket', 'trading', 'ev', 'live', 'flip',
                                          'capital_extractor', 'telegram',
-                                         'longshot', 'settlement', 'model', 'redeem_sweep']) {  // PATCH: longshot
+                                         'longshot', 'settlement']) {
                             res[k] = Object.assign({}, this.form[k], res[k] || {});
                         }
                         this.form = res;

@@ -31,7 +31,6 @@ import bot.engines as engines
 import bot.utils as utils
 from bot.clob_trader import clob_trader
 import bot.longshot as longshot          # PATCH: longshot
-import bot.redeem_sweep as redeem_sweep  # PATCH: longshot
 import bot.ls_maker as ls_maker          # PATCH: longshot maker
 from types import SimpleNamespace        # PATCH: longshot maker
 
@@ -879,41 +878,11 @@ async def handle_order_gone_quiet(order_id: str, trade: Dict[str, Any], token_id
         return False
 
 # ── Long-shot fills (PATCH: longshot) ─────────────────────────────────────────
-async def _fak_fill(res: Dict[str, Any], token_id: str, req_shares: float):
-    """(shares, dollars, status) a fill-and-kill buy got. From Polymarket's answer first
-    (takingAmount = shares, makingAmount = dollars for a buy; read as 6-decimal fixed-math when
-    the number is far above what was ordered), else from the order's own fills. A "delayed"
-    order has no fills yet: its fills are looked up for a few seconds."""
-    data = res.get("response") or {}
-    st = str(data.get("status") or "").lower()
-
-    def num(v):
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return 0.0
-    sh, usd = num(data.get("takingAmount")), num(data.get("makingAmount"))
-    if sh > max(float(req_shares), 1.0) * 1.5:
-        sh, usd = sh / 1e6, usd / 1e6
-    if sh > 0 and usd > 0:
-        return sh, usd, st
-    if st in ("matched", "delayed", ""):
-        for delay in ((1.0, 1.5, 2.5) if st == "delayed" else (0.3, 1.0)):
-            await asyncio.sleep(delay)
-            fills = await asyncio.to_thread(clob_trader.get_order_fills, res.get("order_id"), token_id)
-            if fills:
-                return (sum(float(f["size"]) for f in fills),
-                        sum(float(f["size"]) * float(f["price"]) for f in fills), st)
-    return 0.0, 0.0, st
-
-
 def _ls_add_fill(trade: Dict[str, Any], shares: float, usd: float, quoted_ask: float):
-    """Adds one fill-and-kill fill to a long shot (several orders can fill one long shot)."""
-    trade["ls_fak_shares"] = float(trade.get("ls_fak_shares") or 0.0) + shares
-    trade["ls_fak_usd"] = float(trade.get("ls_fak_usd") or 0.0) + usd
-    trade["live_shares"] = trade["ls_fak_shares"]
-    trade["live_amount"] = trade["ls_fak_usd"]
-    trade["live_entry_price"] = trade["ls_fak_usd"] / trade["ls_fak_shares"]
+    """Adds one fill to a long shot."""
+    trade["live_shares"] = float(trade.get("live_shares") or 0.0) + shares
+    trade["live_amount"] = float(trade.get("live_amount") or 0.0) + usd
+    trade["live_entry_price"] = trade["live_amount"] / trade["live_shares"] if trade["live_shares"] > 0 else quoted_ask
     trade["live_entry_time"] = trade.get("live_entry_time") or datetime.now().isoformat()
     trade["live_slippage"] = trade["live_entry_price"] - quoted_ask
     if usd > 0:                                   # spent funds come off the balance in RAM
@@ -924,29 +893,11 @@ def _ls_add_fill(trade: Dict[str, Any], shares: float, usd: float, quoted_ask: f
         state["precomputed_live_stake"] = round(max(1.0, min(new_stake, new_bal)) if new_bal >= 1.0 else 0.0, 2)
 
 
-async def _ls_close_out(trade: Dict[str, Any], status_if_empty: str, why: str):
-    """Ends a fill-and-kill long shot: FILLED with what its orders bought, else status_if_empty."""
-    if float(trade.get("ls_fak_shares") or 0.0) > 0:
-        trade["live_status"] = "FILLED"
-        msg = (f"LIVE long shot FILLED (FAK, {trade.get('live_attempts', 1)} order(s)): {trade['side']} ${trade['live_amount']:.2f} "
-               f"on {trade['market_slug']} — {trade['live_shares']:.2f} shares @ {trade['live_entry_price']:.4f} "
-               f"(paper entry {trade['paper_entry_price']:.4f})" + (f"; {why}" if why else ""))
-        log_message(msg)
-        await send_telegram(f"🚀 *LIVE Long Shot FILLED (FAK)*\n• Side: `{trade['side']}`\n• Fill Price: `{trade['live_entry_price']:.4f}`\n"
-                            f"• Shares: `{trade['live_shares']:.2f}`\n• Amount: `${trade['live_amount']:.2f}`\n• Market: `{trade['market_slug']}`")
-    else:
-        trade["live_status"] = status_if_empty
-        log_message(f"LONGSHOT live copy stopped for {trade['market_slug']}: {why}")
-    await asyncio.to_thread(save_state)
-    _sync_active_trades_to_latest_data()
-    await broadcast_state()
-
-
 # ── Maker long shots (PATCH: longshot maker) ──────────────────────────────────
 # bot/ls_maker.py keeps the resting bids; these are its links to the rest of the bot.
 def _mk_is_live() -> bool:
-    """Real orders only with a private key and both long shots and maker bids set live."""
-    return bool(settings.PRIVATE_KEY) and longshot.maker_live(settings.LONGSHOT)
+    """Real orders with a private key when bot is running."""
+    return bool(settings.PRIVATE_KEY) and bool(state.get("running"))
 
 
 def _mk_running() -> bool:
@@ -954,9 +905,10 @@ def _mk_running() -> bool:
 
 
 async def _mk_place(token_id: str, shares: float, price: float) -> Dict[str, Any]:
-    """A post-only GTC bid: Polymarket refuses it rather than letting it take the ask."""
-    return await clob_trader.place_limit_buy_async(token_id, shares, price, None, longshot.tick_size_str(price),
-                                                   "GTC", post_only=True)
+    """A post-only GTD bid resting on book."""
+    expiration = int(time.time() + 300)
+    return await clob_trader.place_limit_buy_async(token_id, shares, price, expiration,
+                                                   longshot.tick_size_str(price), "GTD", post_only=True)
 
 
 async def _mk_cancel(order_id: str) -> Dict[str, Any]:
@@ -1097,23 +1049,14 @@ async def _continuous_live_copy_fill(trade: Dict[str, Any], market: Dict[str, An
 
     # (the "LIVE copy started" line is written after the first order went out: no file write before it)
     retry_interval = max(0.01, float(getattr(settings, "COPY_RETRY_INTERVAL_MS", 300) or 300) / 1000.0)
-    if is_ls:
-        max_attempts = int(ls_cfg.get("max_attempts", 3) or 3)
-        resting_s = float(ls_cfg.get("resting_s", 2.0) or 2.0)
-        ls_fak = str(ls_cfg.get("order_type", "FAK")).upper() == "FAK"
-    else:
-        max_attempts = int(getattr(settings, "COPY_MAX_RETRIES", 5) or 5)
-        resting_s = float(getattr(settings, "COPY_RESTING_TIMEOUT_S", 2.0) or 2.0)
-        ls_fak = False
+    max_attempts = int(getattr(settings, "COPY_MAX_RETRIES", 5) or 5)
+    resting_s = float(getattr(settings, "COPY_RESTING_TIMEOUT_S", 2.0) or 2.0)
 
     try:
         while trade["status"] == "OPEN" and trade.get("live_status") == "FILLING":
             now_ts = time.time()
             # 1. Check if window is close to expiry (<15s)
             if trade.get("end_ts") and now_ts >= trade["end_ts"]:
-                if ls_fak:
-                    await _ls_close_out(trade, "TIMEOUT", "window closed")
-                    break
                 trade["live_status"] = "TIMEOUT"
                 log_message(f"LIVE copy stopped for {trade['market_slug']}: window expired")
                 await asyncio.to_thread(save_state)
@@ -1125,9 +1068,6 @@ async def _continuous_live_copy_fill(trade: Dict[str, Any], market: Dict[str, An
             trade["live_attempts"] = attempt_num
 
             if attempt_num > max_attempts:
-                if ls_fak:
-                    await _ls_close_out(trade, "TIMEOUT", f"max attempts reached ({max_attempts})")
-                    break
                 trade["live_status"] = "TIMEOUT"
                 log_message(f"LIVE copy max attempts reached ({max_attempts}) for {trade['market_slug']} — halting to prevent duplicate orders")
                 await asyncio.to_thread(save_state)
@@ -1192,83 +1132,43 @@ async def _continuous_live_copy_fill(trade: Dict[str, Any], market: Dict[str, An
                 state["precomputed_live_stake"] = round(live_amount, 2)
 
             if is_ls:
-                # PATCH: longshot — the long-shot stake (fixed, % or growth-max, per band), a limit of
-                # ask + slippage never above the band's cap, on the book's tick, whole shares whose
-                # cost is whole cents, and its own order type (FAK by default). No growing sweep.
                 lsd = trade.get("longshot") or {}
-                max_px = float(lsd.get("max_price") or current_ask)
+                max_px = float(lsd.get("max_price") or 0.04)
                 if current_ask > max_px + 1e-9:
-                    if ls_fak:
-                        await _ls_close_out(trade, "PRICE_ABOVE_CAP", f"ask {current_ask:.3f} is above the {max_px:.3f} cap")
-                    else:
-                        trade["live_status"] = "PRICE_ABOVE_CAP"
-                        log_message(f"LONGSHOT live copy stopped for {trade['market_slug']}: ask {current_ask:.3f} is above the {max_px:.3f} cap")
-                        await asyncio.to_thread(save_state)
-                        _sync_active_trades_to_latest_data()
-                        await broadcast_state()
-                    break
-                if trade.get("ls_target_usd") is None:
-                    _target = longshot.stake_for(live_balance, ls_cfg, lsd.get("band"), lsd.get("prob"),
-                                                 longshot.taker_price(ls_cfg, current_ask))  # PATCH: longshot maker — fee
-                    if _target <= 0:
-                        trade["live_status"] = "STAKE_ZERO"
-                        log_message(f"LONGSHOT live copy stopped for {trade['market_slug']}: the stake is $0 "
-                                    f"(chance {float(lsd.get('prob') or 0):.3f} vs ask {current_ask:.3f})")
-                        await asyncio.to_thread(save_state)
-                        _sync_active_trades_to_latest_data()
-                        await broadcast_state()
-                        break
-                    trade["ls_target_usd"] = round(_target, 2)
-                _spent = float(trade.get("ls_fak_usd") or 0.0)
-                ls_usd = float(trade["ls_target_usd"]) - _spent
-                if _spent > 0 and ls_usd < 1.0:
-                    await _ls_close_out(trade, "FILLED", "")       # what's left is under the $1 minimum
-                    break
-                if cur_ask_liq_usd is not None and cur_ask_liq_usd >= 1.0:
-                    ls_usd = min(ls_usd, cur_ask_liq_usd)
-                gtd_price = longshot.limit_price(current_ask, float(ls_cfg.get("slippage", 0.01)), max_px)
-                gtd_tick = longshot.tick_size_str(gtd_price)
-                gtd_shares = longshot.order_shares(max(1.0, ls_usd), gtd_price, max_usd=live_balance)
-                order_type = "FAK" if ls_fak else "GTD"
-                if gtd_shares * gtd_price > live_balance + 1e-9:
-                    _why = (f"deposit balance too low (${live_balance:.2f} < ${gtd_shares * gtd_price:.2f} "
-                            f"minimum order @ {gtd_price:.3f})")
-                    if ls_fak:
-                        await _ls_close_out(trade, "INSUFFICIENT_FUNDS", _why)
-                    else:
-                        trade["live_status"] = "INSUFFICIENT_FUNDS"
-                        log_message(f"LONGSHOT live copy stopped for {trade['market_slug']}: {_why}")
-                        await asyncio.to_thread(save_state)
-                        _sync_active_trades_to_latest_data()
-                        await broadcast_state()
-                    break
-            else:
-                # Polymarket order size minimum: at least 5 shares and at least $1.00
-                min_order_cost = round(max(1.00, math.ceil(5.0 * current_ask * 100.0) / 100.0), 2)
-                if live_balance < min_order_cost:
-                    trade["live_status"] = "INSUFFICIENT_FUNDS"
-                    log_message(f"LIVE copy halted for {trade['market_slug']}: deposit balance too low (${live_balance:.2f} < ${min_order_cost:.2f} minimum for 5 shares @ {current_ask:.4f})")
+                    trade["live_status"] = "PRICE_ABOVE_CAP"
+                    log_message(f"LONGSHOT live copy stopped for {trade['market_slug']}: ask {current_ask:.3f} is above the {max_px:.3f} cap")
                     await asyncio.to_thread(save_state)
                     _sync_active_trades_to_latest_data()
                     await broadcast_state()
                     break
 
-                if live_amount < min_order_cost:
-                    live_amount = min_order_cost
+            # Polymarket order size minimum: at least 5 shares and at least $1.00
+            min_order_cost = round(max(1.00, math.ceil(5.0 * current_ask * 100.0) / 100.0), 2)
+            if live_balance < min_order_cost:
+                trade["live_status"] = "INSUFFICIENT_FUNDS"
+                log_message(f"LIVE copy halted for {trade['market_slug']}: deposit balance too low (${live_balance:.2f} < ${min_order_cost:.2f} minimum for 5 shares @ {current_ask:.4f})")
+                await asyncio.to_thread(save_state)
+                _sync_active_trades_to_latest_data()
+                await broadcast_state()
+                break
 
-                if cur_ask_liq_usd is not None and cur_ask_liq_usd >= min_order_cost and live_amount > cur_ask_liq_usd:
-                    live_amount = round(cur_ask_liq_usd, 2)
+            if live_amount < min_order_cost:
+                live_amount = min_order_cost
 
-                # 4. Place GTD limit BUY order directly with progressive sweep
-                extra_slip = min(0.08, (attempt_num - 1) * 0.015)
-                gtd_price = min(0.99, round(current_ask + settings.CLOB_MAX_SLIPPAGE + extra_slip, 4))
-                safe_usd = max(1.00, live_amount)
-                # Guarantee shares >= 5.0 and shares * price >= 1.00 (Polymarket min order size rule: min 5 shares)
-                min_shares = 5.0
-                gtd_shares = max(min_shares, math.ceil((safe_usd / gtd_price) * 100.0) / 100.0)
-                while round(gtd_shares * gtd_price, 4) < 1.00:
-                    gtd_shares = round(gtd_shares + 0.01, 2)
-                gtd_tick, order_type = "0.01", "GTD"
+            if cur_ask_liq_usd is not None and cur_ask_liq_usd >= min_order_cost and live_amount > cur_ask_liq_usd:
+                live_amount = round(cur_ask_liq_usd, 2)
+
+            # Place GTD limit BUY order directly with progressive sweep
+            extra_slip = min(0.08, (attempt_num - 1) * 0.015)
+            limit_cap = float((trade.get("longshot") or {}).get("max_price") or 0.99) if is_ls else 0.99
+            gtd_price = min(limit_cap, round(current_ask + settings.CLOB_MAX_SLIPPAGE + extra_slip, 4))
+            safe_usd = max(1.00, live_amount)
+            # Guarantee shares >= 5.0 and shares * price >= 1.00 (Polymarket min order size rule: min 5 shares)
+            min_shares = 5.0
+            gtd_shares = max(min_shares, math.ceil((safe_usd / gtd_price) * 100.0) / 100.0)
+            while round(gtd_shares * gtd_price, 4) < 1.00:
+                gtd_shares = round(gtd_shares + 0.01, 2)
+            gtd_tick, order_type = ("0.001" if gtd_price < 0.04 else "0.01"), "GTD"
 
             market_end = trade.get("end_ts") or 0
             expiration = int(max(time.time() + 300, market_end))
@@ -1279,53 +1179,11 @@ async def _continuous_live_copy_fill(trade: Dict[str, Any], market: Dict[str, An
             if order_sent is not None:
                 order_sent.set()
             if attempt_num == 1:
-                log_message(f"LIVE copy started for {trade['market_slug']} ({side}{', long shot' if is_ls else ''}) — continuous {order_type} fill loop initiated")
+                log_message(f"LIVE copy started for {trade['market_slug']} ({side}{', long shot' if is_ls else ''}) — continuous GTD fill loop initiated")
             # (same start as before, so anything that reads these lines still matches; now written
             # once the order is out, with how long Polymarket took to answer)
-            log_message(f"LIVE copy attempt #{attempt_num} for {side}{' long shot' if is_ls else ''}: placing {order_type} limit order for {gtd_shares:.2f} shares @ {gtd_price:.4f} "
-                        + (f"(exp: {expiration})" if order_type == "GTD" else "(fill-and-kill)")
-                        + f"... sent, Polymarket answered in {_send_ms:.0f} ms")
-
-            if ls_fak:
-                # PATCH: longshot — fill-and-kill: what it bought is known now and nothing rests on
-                # the book. More orders go out for what's still unfilled (up to max_attempts) while
-                # the ask stays under the cap; a "delayed" order ends it (its result comes later).
-                if gtd_res.get("ok") and gtd_res.get("order_id"):
-                    _oid = gtd_res["order_id"]
-                    trade.setdefault("live_order_ids", []).append(_oid)
-                    trade["live_order_id"] = _oid
-                    trade["live_limit_price"] = gtd_price
-                    trade["live_quoted_price"] = current_ask
-                    _sh, _usd, _st = await _fak_fill(gtd_res, token_id, gtd_shares)
-                    if _sh > 0:
-                        _ls_add_fill(trade, _sh, _usd, current_ask)
-                        log_message(f"LONGSHOT FAK attempt #{attempt_num} bought {_sh:.2f} shares for ${_usd:.2f} "
-                                    f"(avg {_usd / _sh:.4f}, order {_oid})")
-                    else:
-                        log_message(f"LONGSHOT FAK attempt #{attempt_num}: nothing bought at or below {gtd_price:.3f} "
-                                    f"(order {_oid}, status {_st or '?'})")
-                    if _st == "delayed":
-                        await _ls_close_out(trade, "NO_FILL", "Polymarket delayed the order; its fills are checked again when the window settles")
-                        break
-                else:
-                    err = clob_trader.enrich_order_error(str(gtd_res.get("error", "fak_placement_failed")))
-                    if any(k in err for k in ("setup_failed", "client_not_ready", "invalid_private_key", "not enough balance", "balance is not enough")):
-                        await _ls_close_out(trade, "FAILED", f"order refused: {err}")
-                        break
-                    if "no orders found to match" in err.lower():
-                        log_message(f"LONGSHOT FAK attempt #{attempt_num}: nothing offered at or below {gtd_price:.3f}")
-                    else:
-                        log_message(f"LONGSHOT FAK attempt #{attempt_num} failed: {err}")
-                _spent = float(trade.get("ls_fak_usd") or 0.0)
-                if _spent > 0 and float(trade["ls_target_usd"]) - _spent < 1.0:
-                    await _ls_close_out(trade, "FILLED", "")
-                    break
-                if attempt_num >= max_attempts:
-                    await _ls_close_out(trade, "NO_FILL", f"{'stake not fully bought' if _spent > 0 else 'nothing bought'} "
-                                                          f"with {max_attempts} fill-and-kill order(s)")
-                    break
-                await asyncio.sleep(retry_interval)
-                continue
+            log_message(f"LIVE copy attempt #{attempt_num} for {side}{' long shot' if is_ls else ''}: placing GTD limit order for {gtd_shares:.2f} shares @ {gtd_price:.4f} "
+                        + f"(exp: {expiration})... sent, Polymarket answered in {_send_ms:.0f} ms")
 
             if gtd_res.get("ok") and gtd_res.get("order_id"):
                 order_id = gtd_res["order_id"]
@@ -1828,8 +1686,7 @@ async def _redeem_win(trade: Dict[str, Any], market: Optional[Dict[str, Any]],
         return
 
     # Defer on-chain redemption if market was settled via local strike fallback and on-chain outcome is still pending
-    # (PATCH: longshot — also the 60-second-average fallback; the redeem sweep claims it once Polymarket resolves)
-    if trade.get("resolution") in ("close_vs_open", "sampled_twap"):
+    if trade.get("resolution") == "close_vs_open":
         trade["redeem_status"] = "PENDING_ONCHAIN_RESOLUTION"
         log_message(f"REDEEM deferred for {trade['market_slug']}: Position won via local fallback; waiting for on-chain Polymarket resolution before redeeming.")
         return
@@ -1850,7 +1707,6 @@ async def _redeem_win(trade: Dict[str, Any], market: Optional[Dict[str, Any]],
 
     trade["redeem"] = res
     if res.get("ok"):
-        redeem_sweep.mark_attempted(condition_id)  # PATCH: longshot — the sweep won't send it again
         trade["redeem_status"] = "CONFIRMED"
         log_message(f"REDEEM ok for {trade['market_slug']}: {amounts[idx]:.2f} live shares (tx {res.get('tx')})")
     else:
@@ -2367,27 +2223,6 @@ async def evaluate_entry(reason: str = "event"):
                 await broadcast_state()
 
 # ── Long shots (PATCH: longshot) ──────────────────────────────────────────────
-def _settle_price_now():
-    """(price, age in seconds, source) of the latest settlement-feed price."""
-    pw = polymarket_ws_stream.get_last()
-    if pw.get("price") and pw.get("updatedAt"):
-        return float(pw["price"]), max(0.0, time.time() - float(pw["updatedAt"]) / 1000.0), "polymarket_ws"
-    cl = chainlink_ws_stream.get_last()
-    if cl.get("price") and cl.get("updatedAt"):
-        return float(cl["price"]), max(0.0, time.time() - float(cl["updatedAt"]) / 1000.0), "chainlink_rpc"
-    return None, None, None
-
-
-def _ls_price_to_beat(ctx: Dict[str, Any], now: float):
-    """(value, source): the sampled 60-second average at the window start, or the bot's own strike."""
-    if settings.LONGSHOT.get("price_to_beat") == "sampled_twap":
-        v = longshot.price_to_beat(int(ctx["start_ms"]) / 1000.0, now)
-        if v is not None:
-            return v, "sampled_twap"
-    so = ctx.get("strike_open")
-    return (float(so), "bot_strike") if so else (None, None)
-
-
 def _ls_books(ctx: Dict[str, Any]):
     """Best ask + dollars in the top 5 ask levels per side (WebSocket book, else the loop's snapshot)."""
     books, raw = {}, {}
@@ -2418,7 +2253,7 @@ async def evaluate_longshot(reason: str = "event"):
     feed, and order-book updates in the long-shot look window) and once per update_loop pass."""
     global _ls_last_error_ts
     cfg = settings.LONGSHOT
-    if not cfg.get("enabled") or _ls_lock.locked():
+    if _ls_lock.locked():
         return
     async with _ls_lock:
         now = time.time()
@@ -2434,42 +2269,22 @@ async def evaluate_longshot(reason: str = "event"):
                 return
             end_ts = float(ctx["end_ts"])
             secs_left = end_ts - now
-            # PATCH: longshot maker — the check also runs while only the maker bids look
+            # The check runs while either the sniper bands or maker bids look
             if secs_left < longshot.eval_cutoff_s(cfg) or secs_left > longshot.eval_look_s(cfg):
                 return
 
-            model = cfg.get("model", "twap")
-            info: Dict[str, Any] = {"model": model, "secs_left": round(secs_left, 2)}
-            status = {"ts": now, "secs_left": round(secs_left, 2), "model": model}
-            if model == "twap":
-                price_now, age, src = _settle_price_now()
-                if price_now is None or age is None or age > float(cfg.get("max_price_age_s", 3.0)):
-                    state["ls_last"] = {**status, "result": f"stale_price ({'none' if age is None else f'{age:.1f}s'})"}
-                    return
-                ptb, ptb_src = _ls_price_to_beat(ctx, now)
-                if ptb is None:
-                    state["ls_last"] = {**status, "result": "no_price_to_beat"}
-                    return
-                vol = longshot.vol_usd_per_sqrt_s(cfg, price_now, ctx.get("sigma_5m"))
-                r = longshot.prob_up_twap(now, end_ts, ptb, price_now, vol, float(cfg.get("sd_floor_usd", 3.0)))
-                p_up = r["p_up"]
-                info.update(price_to_beat=round(ptb, 2), ptb_source=ptb_src, price_now=price_now,
-                            price_source=src, expected_avg=round(r["expected_avg"], 2), sd=round(r["sd"], 3),
-                            vol_usd_per_sqrt_s=round(vol, 3))
-                trade_strike, strike_src = ptb, ptb_src
-            else:
-                spot = binance_stream.get_last().get("price")
-                tgt = ctx.get("target_open")
-                if not spot or not tgt:
-                    state["ls_last"] = {**status, "result": "no_spot_or_open"}
-                    return
-                if model == "exact":
-                    p_up = longshot.prob_up_exact(spot, tgt, secs_left, ctx.get("sigma_5m"), ctx.get("drift_5m") or 0.0)
-                else:
-                    p_up = indicators.fair_prob_up(spot, tgt, _model_steps(secs_left / 60.0), ctx.get("sigma_5m"),
-                                                   drift_per_step=ctx.get("drift_5m") or 0.0)
-                info.update(spot=spot, model_open=tgt)
-                trade_strike, strike_src = ctx.get("strike_open"), ctx.get("strike_source") or "chainlink_ws"
+            spot = binance_stream.get_last().get("price")
+            tgt = ctx.get("target_open")
+            strike_open = ctx.get("strike_open")
+            strike_src = ctx.get("strike_source") or "chainlink_ws"
+            status = {"ts": now, "secs_left": round(secs_left, 2)}
+            if not spot or not tgt or not strike_open:
+                state["ls_last"] = {**status, "result": "no_spot_or_open"}
+                return
+
+            p_up = longshot.prob_up_exact(spot, tgt, secs_left, ctx.get("sigma_5m"), ctx.get("drift_5m") or 0.0)
+            info: Dict[str, Any] = {"secs_left": round(secs_left, 2), "spot": spot, "model_open": tgt, "strike_open": strike_open}
+            trade_strike, strike_src = strike_open, strike_src
 
             books, raw_ob = _ls_books(ctx)
             if longshot.maker_on(cfg):   # PATCH: longshot maker — the resting bids follow every check
@@ -2482,8 +2297,7 @@ async def evaluate_longshot(reason: str = "event"):
             if secs_left <= longshot.max_look_s(cfg):
                 for side in ("UP", "DOWN"):
                     longshot.note_candidate(int(ctx["start_ms"]), side, p_up if side == "UP" else 1.0 - p_up,
-                                            books[side]["ask"], secs_left, ceiling,
-                                            float(cfg.get("taker_fee_rate", 0.0) or 0.0))
+                                            books[side]["ask"], secs_left, ceiling)
             decision = longshot.decide(p_up, books, secs_left, cfg)
             state["ls_last"] = {**status, "p_up": round(p_up, 4), "up_ask": books["UP"]["ask"],
                                 "down_ask": books["DOWN"]["ask"], "result": decision.get("reason"), **info}
@@ -2514,7 +2328,7 @@ def _ls_window_summary(start_ms: Optional[int]):
     best = longshot.pop_window_best(int(start_ms))
     entered = int(start_ms) in _ls_entered_windows
     _ls_entered_windows.discard(int(start_ms))
-    if not settings.LONGSHOT.get("enabled") or entered:
+    if entered:
         return
     label = datetime.fromtimestamp(int(start_ms) / 1000).strftime('%H:%M')
     if best:
@@ -2525,22 +2339,11 @@ def _ls_window_summary(start_ms: Optional[int]):
 
 
 def _on_book_update():
-    """PATCH: longshot — an order-book change wakes the checks, but only in the long-shot look
-    window (the cheap side's ask is what a long shot waits for); elsewhere nothing changes."""
+    """PATCH: longshot — an order-book change wakes the checks in the long-shot look window."""
     cfg = settings.LONGSHOT
-    if not cfg.get("enabled"):
-        return
     ctx = state.get("ls_ctx")
-    if ctx and 0.0 <= float(ctx.get("end_ts") or 0.0) - time.time() <= longshot.eval_look_s(cfg):  # PATCH: longshot maker
+    if ctx and 0.0 <= float(ctx.get("end_ts") or 0.0) - time.time() <= longshot.eval_look_s(cfg):
         _market_event.set()
-
-
-def _sweep_block_reason() -> Optional[str]:
-    if not settings.PRIVATE_KEY:
-        return "no private key"
-    if not settings.RELAYER_API_KEY:
-        return "no relayer API key; gasless redeem needs one"
-    return None
 
 
 async def entry_watcher():
@@ -2901,7 +2704,7 @@ async def update_loop():
 
             # PATCH: longshot — context for evaluate_longshot (valid until end - cutoff_s)
             ls_ctx = None
-            if settings.LONGSHOT.get("enabled") and poly_snapshot.get("ok") and poly_snapshot.get("market"):
+            if poly_snapshot.get("ok") and poly_snapshot.get("market"):
                 ls_end = None
                 try:
                     ls_end = datetime.fromisoformat(str(poly_snapshot["market"].get("endDate")).replace('Z', '+00:00')).timestamp()
@@ -3046,7 +2849,7 @@ async def update_loop():
                 },
                 "analysis": {
                     "probability": prob_view, "edge": edge, "decision": decision,
-                    "longshot": state.get("ls_last") if settings.LONGSHOT.get("enabled") else None,  # PATCH: longshot
+                    "longshot": state.get("ls_last"),
                 }
             }
             state["last_update_ts"] = time.time()
@@ -3130,15 +2933,9 @@ async def lifespan(app: FastAPI):
     ]
 
 
-    # PATCH: longshot — redeems anything the Data API lists as redeemable for the trading wallet
-    tasks.append(asyncio.create_task(redeem_sweep.run_forever(
-        get_cfg=lambda: settings.REDEEM_SWEEP, log=log_message,
-        get_wallet=clob_trader.get_funder, redeem=clob_trader.redeem,
-        can_run=_sweep_block_reason)))
     tasks.append(asyncio.create_task(ls_maker_mgr.run_forever()))  # PATCH: longshot maker
-    log_message("LONGSHOT: " + (("on — " + longshot.describe(settings.LONGSHOT)) if settings.LONGSHOT.get("enabled") else "off")
-                + f" | settlement: {settings.SETTLEMENT_MODE} | model clock: {settings.MODEL_TIME_MODE}"
-                + f" | redeem sweep: {'on' if settings.REDEEM_SWEEP.get('enabled') else 'off'}")
+    log_message("LONGSHOT: on — " + longshot.describe(settings.LONGSHOT)
+                + f" | settlement: {settings.SETTLEMENT_MODE} | model clock: {settings.MODEL_TIME_MODE}")
 
 
     # Pre-warm CLOB trader client & on-chain verification in background thread if private key set
@@ -3467,7 +3264,6 @@ async def get_settings():
             "authoritative_settle_wait_s": settings.AUTHORITATIVE_SETTLE_WAIT_S,
         },
         "model": {"time_mode": settings.MODEL_TIME_MODE},
-        "redeem_sweep": settings.REDEEM_SWEEP,
     }
 
 @app.post("/api/settings")
@@ -3498,9 +3294,9 @@ async def post_settings(new_settings: Dict[str, Any]):
                 out[k] = v
         return out
 
-    new_ls = new_st = new_rs = new_tm = None
+    new_ls = new_st = new_tm = None
     try:
-        for _sec in ("longshot", "settlement", "model", "redeem_sweep"):
+        for _sec in ("longshot", "settlement", "model"):
             if _sec in new_settings and not isinstance(new_settings[_sec], dict):
                 raise ValueError(f"{_sec} must be an object")
         if isinstance(new_settings.get("longshot"), dict):
@@ -3513,9 +3309,6 @@ async def post_settings(new_settings: Dict[str, Any]):
             new_tm = new_settings["model"]["time_mode"]
             if new_tm not in ("steps", "exact"):
                 raise ValueError("model.time_mode must be steps or exact")
-        if isinstance(new_settings.get("redeem_sweep"), dict):
-            new_rs = redeem_sweep.normalize({**settings.REDEEM_SWEEP, **new_settings["redeem_sweep"]})
-            new_settings["redeem_sweep"] = new_rs
     except ValueError as e:
         return {"status": "error", "error": f"invalid_settings: {e}"}
 
@@ -3590,25 +3383,34 @@ async def post_settings(new_settings: Dict[str, Any]):
     # Remove obsolete keys if present in file
     merged_cfg.pop("mode", None)
     merged_cfg.pop("paper_balance_usd", None)
+    merged_cfg.pop("redeem_sweep", None)
+    if "longshot" in merged_cfg and isinstance(merged_cfg["longshot"], dict):
+        for k in ("enabled", "live", "order_type", "max_attempts", "resting_s", "slippage", "cutoff_s",
+                  "min_ask_liquidity_usd", "max_price_age_s", "vol_usd_per_sqrt_s", "vol_fallback_usd_per_sqrt_s",
+                  "sd_floor_usd", "taker_fee_rate", "model", "price_to_beat", "pick", "stake_type", "stake_value", "growth_cap_pct"):
+            merged_cfg["longshot"].pop(k, None)
+        if "maker" in merged_cfg["longshot"] and isinstance(merged_cfg["longshot"]["maker"], dict):
+            for k in ("enabled", "live", "min_prob", "max_ask", "look_s", "cutoff_s", "max_fills_per_window", "requote_s", "poll_s",
+                      "stake_type", "stake_value", "growth_cap_pct"):
+                merged_cfg["longshot"]["maker"].pop(k, None)
+        if "bands" in merged_cfg["longshot"] and isinstance(merged_cfg["longshot"]["bands"], dict):
+            merged_cfg["longshot"]["bands"].pop("favored", None)
+            for b in merged_cfg["longshot"]["bands"].values():
+                if isinstance(b, dict):
+                    for k in ("enabled", "look_s", "min_prob", "min_multiple", "stake_type", "stake_value", "growth_cap_pct"):
+                        b.pop(k, None)
 
     with open(CONFIG_PATH, "w") as f:
         json.dump(merged_cfg, f, indent=2)
 
-    # PATCH: longshot — apply the checked sections first: they can't fail, so the
-    # running bot matches config.json even if an original section below raises
+    # Apply the checked sections
     if new_ls is not None:
-        was_on = bool(settings.LONGSHOT.get("enabled"))
         settings.LONGSHOT = new_ls
-        if new_ls.get("enabled"):
-            log_message("LONGSHOT: on — " + longshot.describe(new_ls))
-        elif was_on:
-            log_message("LONGSHOT: off")
+        log_message("LONGSHOT: on — " + longshot.describe(new_ls))
     if new_st is not None:
         apply_settlement(settings, new_st)
     if new_tm is not None:
         settings.MODEL_TIME_MODE = new_tm
-    if new_rs is not None:
-        settings.REDEEM_SWEEP = new_rs
 
     ct = merged_cfg.get("copy_trader", {})
     if ct:
@@ -3896,5 +3698,5 @@ async def get_history():
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8020))
+    port = int(os.getenv("PORT", 8050))
     uvicorn.run(app, host="0.0.0.0", port=port)

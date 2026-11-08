@@ -27,70 +27,26 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 DEFAULTS: Dict[str, Any] = {
-    "enabled": False,          # master switch for the whole mode
-    "live": True,              # False = long shots are paper-only (no live orders)
-    "model": "twap",           # "twap" | "exact" | "regular" (see probability() below)
-    "price_to_beat": "sampled_twap",  # "sampled_twap" | "bot_strike"
-    "pick": "multiple",        # when several bands fire: "multiple" (chance / ask) or "ev" (chance - ask)
-    "stake_type": "",          # "" = regular bot stake (RISK_TYPE & RISK_VALUE); or "fixed" | "percent" | "growth"
-    "stake_value": None,
-    "growth_cap_pct": 30.0,    # growth stake: never more than this % of the balance
-    "max_per_window": 1,       # long-shot trades per 15m window (the regular slot is separate)
+    "max_per_window": 1,       # long-shot trades per 15m window
+    "look_s": 60,              # final minute look window in seconds
     "cutoff_s": 3.0,           # no new long shots in the last N seconds
-    "min_ask_liquidity_usd": 2.0,  # dollars resting in the top 5 ask levels, at least
-    "max_price_age_s": 3.0,    # skip if the settlement-feed price is older than this
-    "slippage": 0.01,          # limit = ask + this (probability units), never above the band's max_price
-    "order_type": "FAK",       # "FAK" = fill-and-kill: buys what's offered up to the limit at once,
-                               #         the rest is cancelled (nothing rests on the book)
-                               # "GTD" = rests resting_s seconds, then cancel and re-quote
-    "max_attempts": 3,         # live orders per long shot (FAK: more orders for what's still unfilled)
-    "resting_s": 4.0,          # GTD only: seconds a resting order waits before it is cancelled / re-quoted
-    "vol_usd_per_sqrt_s": 0.0,  # BTC volatility in $ per sqrt(second); 0 = derive from the 5m candles
-    "vol_fallback_usd_per_sqrt_s": 6.0,  # used when the candles give nothing
-    "sd_floor_usd": 3.0,       # smallest uncertainty the twap model allows for the closing average
-    "taker_fee_rate": 0.07,    # Polymarket's crypto taker fee: shares x rate x price x (1 - price).
-                               # The bands' chance / price and chance - price count it (0 = ignore fees)
-    # PATCH: longshot maker — resting post-only bids (makers pay no fee), next to the bands
     "maker": {
-        "enabled": False,      # the maker bids' own switch (long shots must be on too)
-        "live": False,         # False = paper: no order is sent, fills are estimated from the book and trades
-        "price": 0.01,         # the most a bid pays: 0.1¢ steps below 4¢, whole cents from 4¢
-        "min_prob": 0.20,      # a bid rests only while the model gives its side at least this
-        "max_ask": 0.30,       # ... and the side's ask is at or under this (the cheap side; no ask = allowed)
-        "look_s": 60,          # ... and only in the last N seconds of the window
-        "cutoff_s": 3.0,       # every bid is cancelled N seconds before the close
-        "max_fills_per_window": 1,  # bids that got a fill; once reached no new bids that window
-        "stake_type": "",      # "" = the long-shot stake; or fixed / percent / growth like a band
-        "stake_value": None,
-        "growth_cap_pct": None,
-        "requote_s": 2.0,      # a side's bid is placed at most once per N seconds (cancel/re-place churn)
-        "poll_s": 1.0,         # live: how often a resting bid's fills are read
+        "price": 0.01,         # resting maker bid price (1¢)
     },
     "bands": {
-        # Cheap but already favoured by the model.
-        "favored": {"enabled": True, "look_s": 60, "ask_min": 0.07, "ask_max": 0.10,
-                    "max_price": 0.15, "min_prob": 0.55, "min_multiple": 0.0,
-                    "stake_type": "", "stake_value": None, "growth_cap_pct": None},
-        # Very cheap; fires when chance / ask is at least min_multiple.
-        "final":   {"enabled": True, "look_s": 60, "ask_min": 0.01, "ask_max": 0.03,
-                    "max_price": 0.04, "min_prob": 0.0, "min_multiple": 10.0,
-                    "stake_type": "", "stake_value": None, "growth_cap_pct": None},
-        # A band's own stake: stake_type "" = use the long-shot stake above; otherwise
-        # "fixed" / "percent" with stake_value, or "growth" with growth_cap_pct (blank = the cap above).
+        "final": {
+            "ask_min": 0.01,
+            "ask_max": 0.03,
+            "max_price": 0.04,
+        },
     },
 }
 
-BAND_TEMPLATE = {"enabled": True, "look_s": 60, "ask_min": 0.0, "ask_max": 0.0,
-                 "max_price": 0.0, "min_prob": 0.0, "min_multiple": 0.0,
-                 "stake_type": "", "stake_value": None, "growth_cap_pct": None}
+BAND_TEMPLATE = {"ask_min": 0.01, "ask_max": 0.03, "max_price": 0.04}
 
 MAKER_DEFAULTS = DEFAULTS["maker"]
 
-STAKE_TYPES = ("fixed", "percent", "growth", "regular", "")
-ORDER_TYPES = ("FAK", "GTD")
-
-MODELS = ("twap", "exact", "regular")
-PTB_MODES = ("sampled_twap", "bot_strike")
+ORDER_TYPES = ("GTD",)
 
 
 def as_bool(v: Any, label: str = "value") -> bool:
@@ -141,112 +97,25 @@ def normalize(user_cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             return
         obj[key] = v
 
-    for k in ("enabled", "live"):
-        try:
-            cfg[k] = as_bool(cfg.get(k), k)
-        except ValueError as e:
-            errs.append(str(e))
-    if cfg.get("model") not in MODELS:
-        errs.append(f"model must be one of {', '.join(MODELS)}")
-    if cfg.get("price_to_beat") not in PTB_MODES:
-        errs.append(f"price_to_beat must be one of {', '.join(PTB_MODES)}")
-    if cfg.get("pick") not in ("multiple", "ev"):
-        errs.append("pick must be multiple or ev")
-    cfg["order_type"] = str(cfg.get("order_type") or "FAK").upper()
-    if cfg["order_type"] not in ORDER_TYPES:
-        errs.append("order_type must be FAK or GTD")
-    cfg["stake_type"] = str(cfg.get("stake_type", "") or "").lower()
-    if cfg["stake_type"] not in STAKE_TYPES:
-        errs.append("stake_type must be fixed, percent, growth or regular")
-    if cfg["stake_type"] in ("regular", ""):
-        cfg["stake_value"] = None
-    else:
-        num(cfg, "stake_value", "stake", 0, 1_000_000)
-    num(cfg, "growth_cap_pct", "growth cap", 0, 100)
     num(cfg, "max_per_window", "max per window", 0, 100, as_int=True)
-    num(cfg, "cutoff_s", "cutoff", 0, 900)
-    num(cfg, "min_ask_liquidity_usd", "min ask liquidity", 0, 1_000_000)
-    num(cfg, "max_price_age_s", "max price age", 0.1, 3600)
-    num(cfg, "slippage", "slippage", 0, 0.99)
-    num(cfg, "max_attempts", "max attempts", 1, 50, as_int=True)
-    num(cfg, "resting_s", "resting time", 0.2, 600)
-    num(cfg, "vol_usd_per_sqrt_s", "volatility", 0, 10_000)
-    num(cfg, "vol_fallback_usd_per_sqrt_s", "fallback volatility", 0.0001, 10_000)
-    num(cfg, "sd_floor_usd", "sd floor", 0, 100_000)
-    num(cfg, "taker_fee_rate", "taker fee rate", 0, 0.5)
+    num(cfg, "look_s", "look window", 1, 900)
+    cfg["order_type"] = "GTD"
 
-    # PATCH: longshot maker
     mk = cfg.get("maker")
-    if not isinstance(mk, dict):
-        errs.append("maker must be an object")
-    else:
-        for k in ("enabled", "live"):
-            try:
-                mk[k] = as_bool(mk.get(k), f"maker.{k}")
-            except ValueError as e:
-                errs.append(str(e))
-        num(mk, "price", "maker.price", 0.001, 0.5)
-        num(mk, "min_prob", "maker.min_prob", 0, 1)
-        num(mk, "max_ask", "maker.max_ask", 0.001, 1)
-        num(mk, "look_s", "maker.look_s", 1, 900)
-        num(mk, "cutoff_s", "maker.cutoff_s", 0, 900)
-        num(mk, "max_fills_per_window", "maker.max_fills_per_window", 0, 100, as_int=True)
-        num(mk, "requote_s", "maker.requote_s", 0.2, 600)
-        num(mk, "poll_s", "maker.poll_s", 0.2, 60)
-        if isinstance(mk.get("price"), float) and not on_price_grid(mk["price"]):
-            errs.append("maker.price must be in 0.1¢ steps below 4¢ and whole cents from 4¢")
-        if (isinstance(mk.get("cutoff_s"), float) and isinstance(mk.get("look_s"), float)
-                and mk["cutoff_s"] >= mk["look_s"]):
-            errs.append("maker.cutoff_s must be below maker.look_s")
-        st = mk.get("stake_type")
-        st = "" if st in (None, "", "inherit", "default", "regular") else str(st).lower()
-        if st and st not in STAKE_TYPES:
-            errs.append("maker.stake_type must be blank, fixed, percent, growth or regular")
-        mk["stake_type"] = st
-        for key, label, hi in (("stake_value", "stake", 1_000_000), ("growth_cap_pct", "growth cap", 100)):
-            if mk.get(key) in (None, ""):
-                mk[key] = None
-            else:
-                num(mk, key, f"maker.{label}", 0, hi)
-        if st in ("fixed", "percent") and mk.get("stake_value") is None:
-            errs.append(f"maker: a {st} stake needs a stake value")
+    if isinstance(mk, dict):
+        if "price" in mk:
+            num(mk, "price", "maker.price", 0.001, 0.5)
 
     bands = cfg.get("bands")
-    if not isinstance(bands, dict):
-        errs.append("bands must be an object")
-    else:
+    if isinstance(bands, dict):
         for name, b in bands.items():
-            if not isinstance(b, dict):
-                errs.append(f"band {name} must be an object")
-                continue
-            try:
-                b["enabled"] = as_bool(b.get("enabled", True), f"{name}.enabled")
-            except ValueError as e:
-                errs.append(str(e))
-            num(b, "look_s", f"{name}.look_s", 0, 900)
-            num(b, "ask_min", f"{name}.ask_min", 0, 1)
-            num(b, "ask_max", f"{name}.ask_max", 0, 1)
-            num(b, "max_price", f"{name}.max_price", 0, 1)
-            num(b, "min_prob", f"{name}.min_prob", 0, 1)
-            num(b, "min_multiple", f"{name}.min_multiple", 0, 1_000_000)
-            try:
-                if float(b["ask_min"]) > float(b["ask_max"]):
+            if isinstance(b, dict):
+                if "ask_min" in b: num(b, "ask_min", f"{name}.ask_min", 0, 1)
+                if "ask_max" in b: num(b, "ask_max", f"{name}.ask_max", 0, 1)
+                if "max_price" in b: num(b, "max_price", f"{name}.max_price", 0, 1)
+                if "ask_min" in b and "ask_max" in b and float(b["ask_min"]) > float(b["ask_max"]):
                     errs.append(f"{name}: ask_min is above ask_max")
-            except (TypeError, ValueError, KeyError):
-                pass
-            # the band's own stake (blank = use the long-shot stake)
-            st = b.get("stake_type")
-            st = "" if st in (None, "", "inherit", "default", "regular") else str(st).lower()
-            if st and st not in STAKE_TYPES:
-                errs.append(f"{name}.stake_type must be blank, fixed, percent, growth or regular")
-            b["stake_type"] = st
-            for key, label, hi in (("stake_value", "stake", 1_000_000), ("growth_cap_pct", "growth cap", 100)):
-                if b.get(key) in (None, ""):
-                    b[key] = None
-                else:
-                    num(b, key, f"{name}.{label}", 0, hi)
-            if st in ("fixed", "percent") and b.get("stake_value") is None:
-                errs.append(f"{name}: a {st} band stake needs a stake value")
+
     if errs:
         raise ValueError("; ".join(errs))
     return cfg
@@ -256,62 +125,48 @@ def describe(cfg: Dict[str, Any]) -> str:
     """One log line with the active settings."""
     parts = []
     for name, b in (cfg.get("bands") or {}).items():
-        if not b.get("enabled", True):
-            continue
-        cond = []
-        if b.get("min_prob"):
-            cond.append(f"p≥{b['min_prob']:.2f}")
-        if b.get("min_multiple"):
-            cond.append(f"×{b['min_multiple']:g}")
-        own = f" stake {stake_text(*band_stake(cfg, name))}" if b.get("stake_type") else ""
-        parts.append(f"{name} {b['ask_min']*100:g}–{b['ask_max']*100:g}¢ cap {b['max_price']*100:g}¢ "
-                     f"{' '.join(cond) or 'no gate'} last {b['look_s']:g}s{own}")
-    stake = stake_text(*band_stake(cfg))
+        if b.get("enabled", True):
+            parts.append(f"{name} {float(b.get('ask_min', 0.01))*100:g}–{float(b.get('ask_max', 0.03))*100:g}¢ (cap {float(b.get('max_price', 0.04))*100:g}¢)")
     mk = cfg.get("maker") or {}
-    maker = ""
-    if mk.get("enabled"):   # PATCH: longshot maker
-        maker = (f" | maker bids {float(mk['price']) * 100:g}¢ while chance ≥{float(mk['min_prob']):.2f} "
-                 f"and ask ≤{float(mk['max_ask']) * 100:g}¢, "
-                 f"last {float(mk['look_s']):g}s to {float(mk['cutoff_s']):g}s, stake {stake_text(*_stake_of(cfg, mk))}, "
-                 f"max {mk.get('max_fills_per_window')} filled/window, {'live' if maker_live(cfg) else 'paper'}")
-    return (f"model {cfg.get('model')}, price to beat {cfg.get('price_to_beat')}, stake {stake}, "
-            f"{'live ' + str(cfg.get('order_type', 'FAK')) if cfg.get('live') else 'paper only'}, "
-            f"max {cfg.get('max_per_window')}/window, taker fee {float(cfg.get('taker_fee_rate') or 0):g} | "
-            + ("; ".join(parts) or "no bands enabled") + maker)
+    maker_str = f" | maker {float(mk.get('price', 0.01))*100:g}¢ bid" if maker_on(cfg) else ""
+    return (f"stake {stake_text()}, GTD, max {cfg.get('max_per_window', 1)}/window, last {cfg.get('look_s', 60)}s | "
+            + ("; ".join(parts) or "no bands") + maker_str)
 
 
 def max_look_s(cfg: Dict[str, Any]) -> float:
-    vals = [float(b.get("look_s", 0)) for b in (cfg.get("bands") or {}).values() if b.get("enabled", True)]
-    return max(vals) if vals else 0.0
+    look = float(cfg.get("look_s", 60.0))
+    for b in (cfg.get("bands") or {}).values():
+        if b.get("enabled", True):
+            look = max(look, float(b.get("look_s", look)))
+    return look
 
 
 # PATCH: longshot maker — the checks run while either the bands or the maker bids look
 def maker_on(cfg: Dict[str, Any]) -> bool:
-    return bool(cfg.get("enabled") and (cfg.get("maker") or {}).get("enabled"))
+    mk = cfg.get("maker")
+    if not isinstance(mk, dict):
+        return False
+    return float(mk.get("price", 0.0) or 0.0) > 0
 
 
 def maker_live(cfg: Dict[str, Any]) -> bool:
-    """Maker bids are real orders only when both long shots and the maker block are set live."""
-    return bool(cfg.get("live") and (cfg.get("maker") or {}).get("live"))
+    return True
 
 
 def eval_look_s(cfg: Dict[str, Any]) -> float:
     look = max_look_s(cfg)
     if maker_on(cfg):
-        look = max(look, float(cfg["maker"].get("look_s", 0)))
+        look = max(look, float((cfg.get("maker") or {}).get("look_s", look)))
     return look
 
 
 def eval_cutoff_s(cfg: Dict[str, Any]) -> float:
-    cut = float(cfg.get("cutoff_s", 3.0))
-    if maker_on(cfg):
-        cut = min(cut, float(cfg["maker"].get("cutoff_s", cut)))
-    return cut
+    return float(cfg.get("cutoff_s", 3.0))
 
 
 def max_band_ask(cfg: Dict[str, Any]) -> float:
     vals = [float(b.get("ask_max", 0)) for b in (cfg.get("bands") or {}).values() if b.get("enabled", True)]
-    return max(vals) if vals else 0.0
+    return max(vals) if vals else 0.04
 
 
 # ── Settlement-feed price recorder (for the 60-second average) ────────────────
@@ -453,22 +308,10 @@ def prob_up_exact(spot: float, strike: float, secs_left: float,
 # ── Decision ──────────────────────────────────────────────────────────────────
 def decide(p_up: float, books: Dict[str, Dict[str, Optional[float]]], secs_left: float,
            cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Pick at most one (side, band). books = {"UP": {"ask": .., "liq_usd": ..}, "DOWN": {..}}.
-
-    A band fires on a side when: the band is enabled; secs_left is within its look_s and
-    not under cutoff_s; ask_min <= ask <= ask_max and ask <= max_price; the side's chance
-    >= min_prob; chance / ask >= min_multiple (0 = off); and the top-5 ask levels hold at
-    least min_ask_liquidity_usd (skipped when the book doesn't say). When several fire,
-    `pick` chooses: highest chance/ask ("multiple") or highest chance - ask ("ev").
-    PATCH: longshot maker — "ask" in chance/ask and chance - ask is the ask plus the taker
-    fee (taker_fee_rate): what a share really costs. The ask ranges and max_price stay on the
-    book's own price."""
+    """Pick at most one long-shot trade candidate (side, band) based on ask range."""
     cutoff = float(cfg.get("cutoff_s", 3.0))
     if secs_left < cutoff:
         return {"action": "NO_TRADE", "reason": "longshot_past_cutoff"}
-    min_liq = float(cfg.get("min_ask_liquidity_usd", 0.0))
-    fee = float(cfg.get("taker_fee_rate", 0.0) or 0.0)
-    by_ev = cfg.get("pick") == "ev"
     best, reasons = None, []
     for side in ("UP", "DOWN"):
         p = p_up if side == "UP" else 1.0 - p_up
@@ -476,30 +319,24 @@ def decide(p_up: float, books: Dict[str, Dict[str, Optional[float]]], secs_left:
         ask = bk.get("ask")
         if ask is None or ask <= 0:
             continue
-        liq = bk.get("liq_usd")
         for name, band in (cfg.get("bands") or {}).items():
-            if not band.get("enabled", True) or secs_left > float(band.get("look_s", 60)):
+            if not band.get("enabled", True):
                 continue
-            if not (float(band.get("ask_min", 0)) <= ask <= float(band.get("ask_max", 0))):
+            look = float(band.get("look_s") or cfg.get("look_s", 60.0))
+            if secs_left > look:
                 continue
-            if ask > float(band.get("max_price", 1.0)):
+            ask_min = float(band.get("ask_min", 0.01))
+            ask_max = float(band.get("ask_max", 0.03))
+            max_price = float(band.get("max_price", ask_max))
+            if not (ask_min <= ask <= ask_max):
                 continue
-            eff = fee_adjusted(ask, fee)
-            mult = p / eff
-            if p < float(band.get("min_prob", 0.0)):
-                reasons.append(f"{name} {side} p {p:.3f}<{float(band['min_prob']):.2f}")
+            if ask > max_price:
                 continue
-            if float(band.get("min_multiple", 0.0)) > 0 and mult < float(band["min_multiple"]):
-                reasons.append(f"{name} {side} ×{mult:.1f}<{float(band['min_multiple']):g}")
-                continue
-            if min_liq > 0 and liq is not None and liq < min_liq:
-                reasons.append(f"{name} {side} thin ${liq:.2f}")
-                continue
-            cand = {"action": "ENTER", "side": side, "band": name, "prob": p, "price": ask, "eff_price": eff,
-                    "multiple": mult, "ev": p - eff, "max_price": float(band.get("max_price", ask)),
+            mult = p / ask if ask > 0 else 0.0
+            cand = {"action": "ENTER", "side": side, "band": name, "prob": p, "price": ask,
+                    "multiple": mult, "max_price": max_price,
                     "phase": "LONGSHOT", "strength": "LONGSHOT", "reason": f"longshot_{name}"}
-            key = "ev" if by_ev else "multiple"
-            if best is None or cand[key] > best[key]:
+            if best is None or cand["multiple"] > best["multiple"]:
                 best = cand
     if best:
         return best
@@ -514,7 +351,7 @@ def note_candidate(start_ms: int, side: str, p: float, ask: Optional[float], sec
                    ask_ceiling: float, fee_rate: float = 0.0) -> None:
     if not ask or ask <= 0 or ask > ask_ceiling:
         return
-    m = p / fee_adjusted(ask, fee_rate)
+    m = p / ask if ask > 0 else 0.0
     cur = _window_best.get(start_ms)
     if cur is None or m > cur["multiple"]:
         _window_best[start_ms] = {"side": side, "prob": p, "ask": ask, "multiple": m,
@@ -563,71 +400,41 @@ def growth_fraction(prob: Optional[float], price: Optional[float]) -> float:
     return max(0.0, (float(prob) - float(price)) / (1.0 - float(price)))
 
 
-def _stake_of(cfg: Dict[str, Any], b: Optional[Dict[str, Any]]) -> Tuple[str, float, float]:
-    """(stake_type, stake_value, growth_cap_pct) of a band or the maker block: its own stake if it
-    has a stake_type, else the long-shot stake (or bot's regular stake if blank)."""
-    b = b or {}
-    own = bool(b.get("stake_type"))
-    raw_typ = b.get("stake_type") if own else cfg.get("stake_type")
-    raw_typ = "" if raw_typ in (None, "", "inherit", "default", "regular") else str(raw_typ).lower()
+def stake_text(*args, **kwargs) -> str:
     try:
         from bot.config import settings
-        default_typ = (getattr(settings, "RISK_TYPE", "percent") or "percent").lower()
-        default_val = float(getattr(settings, "RISK_VALUE", 10.0) or 10.0)
+        risk_type = (getattr(settings, "RISK_TYPE", "percent") or "percent").lower()
+        risk_val = float(getattr(settings, "RISK_VALUE", 10.0) or 10.0)
     except Exception:
-        default_typ, default_val = "percent", 10.0
-
-    typ = raw_typ if raw_typ else default_typ
-    if own and b.get("stake_value") is not None and raw_typ:
-        val = float(b["stake_value"])
-    elif cfg.get("stake_value") is not None and raw_typ:
-        val = float(cfg["stake_value"])
-    else:
-        val = default_val
-
-    cap = b.get("growth_cap_pct") if own and b.get("growth_cap_pct") is not None else cfg.get("growth_cap_pct", 30.0)
-    return typ, float(val or 0.0), float(cap or 0.0)
+        risk_type, risk_val = "percent", 10.0
+    return f"{risk_val:g}% balance" if risk_type == "percent" else f"${risk_val:g}"
 
 
-def band_stake(cfg: Dict[str, Any], band: Optional[str] = None) -> Tuple[str, float, float]:
-    """(stake_type, stake_value, growth_cap_pct) for a band: its own stake if it has a stake_type,
-    else the long-shot stake. A band's blank growth cap falls back to the long-shot cap."""
-    return _stake_of(cfg, (cfg.get("bands") or {}).get(band))
-
-
-def stake_text(typ: str, val: float, cap: float) -> str:
-    return f"${val:g}" if typ == "fixed" else f"{val:g}%" if typ == "percent" else f"growth-max ≤{cap:g}%"
-
-
-def _stake_amount(typ: str, val: float, cap: float, balance: float,
-                  prob: Optional[float], price: Optional[float]) -> float:
+def stake_for(balance: float, *args, **kwargs) -> float:
+    """Dollar stake for one long shot: uses the bot's risk value at all times."""
     bal = max(0.0, float(balance or 0.0))
-    if typ == "fixed":
-        amt = val
-    elif typ == "percent":
-        amt = val / 100.0 * bal
+    if bal <= 0:
+        return 0.0
+    try:
+        from bot.config import settings
+        risk_type = (getattr(settings, "RISK_TYPE", "percent") or "percent").lower()
+        risk_val = float(getattr(settings, "RISK_VALUE", 10.0) or 10.0)
+    except Exception:
+        risk_type, risk_val = "percent", 10.0
+    if risk_type == "fixed":
+        amt = risk_val
     else:
-        amt = min(growth_fraction(prob, price), cap / 100.0) * bal
-    return max(0.0, min(amt, bal))
+        amt = (risk_val / 100.0) * bal
+    return max(1.0, min(amt, bal)) if bal >= 1.0 else 0.0
 
 
-def stake_for(balance: float, cfg: Dict[str, Any], band: Optional[str] = None,
-              prob: Optional[float] = None, price: Optional[float] = None) -> float:
-    """Dollar stake for one long shot: fixed dollars, a % of the balance, or the growth-maximizing
-    share of the balance for this chance and price, capped at growth_cap_pct. Never above the balance."""
-    return _stake_amount(*band_stake(cfg, band), balance, prob, price)
+def maker_stake(balance: float, *args, **kwargs) -> float:
+    """Maker stake: uses the bot's risk value at all times."""
+    return stake_for(balance)
 
 
-def maker_stake(balance: float, cfg: Dict[str, Any], prob: Optional[float] = None,
-                price: Optional[float] = None) -> float:
-    """PATCH: longshot maker — stake_for() with the maker block's own stake (blank = long-shot stake).
-    A maker pays no fee, so growth uses the bid price as it is."""
-    return _stake_amount(*_stake_of(cfg, cfg.get("maker")), balance, prob, price)
-
-
-def stake_usd(balance: float, cfg: Dict[str, Any]) -> float:
-    """The long-shot stake without a band or chance (a growth stake needs both, so it is 0 here)."""
-    return stake_for(balance, cfg)
+def stake_usd(balance: float, *args, **kwargs) -> float:
+    return stake_for(balance)
 
 
 def share_step(px: float) -> int:

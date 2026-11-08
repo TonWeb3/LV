@@ -109,9 +109,8 @@ class Settings(BaseSettings):
         return self.CHAINLINK_AGGREGATORS.get(s, self.CHAINLINK_BTC_USD_AGGREGATOR)
 
     # Proxy
-    # ── Long shots & automated redeem sweep ───────────────────────────────────────
+    # ── Long shots ───────────────────────────────────────────────────────────────
     LONGSHOT: Dict[str, Any] = {}
-    REDEEM_SWEEP: Dict[str, Any] = {}
 
     HTTP_PROXY: str = os.getenv("HTTP_PROXY", os.getenv("http_proxy", ""))
     HTTPS_PROXY: str = os.getenv("HTTPS_PROXY", os.getenv("https_proxy", ""))
@@ -149,12 +148,9 @@ def load_settings():
     base_settings = Settings()
     try:
         from bot import longshot as _longshot
-        from bot import redeem_sweep as _redeem_sweep
         base_settings.LONGSHOT = _longshot.merged({})
-        base_settings.REDEEM_SWEEP = _redeem_sweep.merged({})
     except Exception:
         base_settings.LONGSHOT = {}
-        base_settings.REDEEM_SWEEP = {}
     config_path = CONFIG_PATH if os.path.exists(CONFIG_PATH) else "config.json"
     if os.path.exists(config_path):
         try:
@@ -251,13 +247,6 @@ def load_settings():
                     base_settings.LONGSHOT = _longshot.normalize(config_data["longshot"])
                 except Exception as e:
                     print(f"Warning: Failed to load longshot config: {e}")
-
-            if "redeem_sweep" in config_data:
-                try:
-                    from bot import redeem_sweep as _redeem_sweep
-                    base_settings.REDEEM_SWEEP = _redeem_sweep.normalize(config_data["redeem_sweep"])
-                except Exception as e:
-                    print(f"Warning: Failed to load redeem_sweep config: {e}")
 
             # Legacy flat keys fallback
             if "auto_withdraw_enabled" in config_data and "capital_extractor" not in config_data:
