@@ -36,7 +36,7 @@ from bot import longshot as L
 
 KEEP_MARGIN = 0.02      # a resting bid is kept while the chance is at least min_prob - this
 ASK_KEEP_MARGIN = 0.05  # ... and its side's ask is at most max_ask + this
-VIEW_MAX_AGE_S = 2.0    # no fresh long-shot check for this long -> every bid is cancelled
+VIEW_MAX_AGE_S = 6.0    # no fresh long-shot check for this long -> every bid is cancelled
 FINAL_CHECK_S = 0.5     # live: fills are read once more this long after a cancel
 LOOP_S = 0.5            # the manager also runs this often without a wake-up
 PAPER_FILLS_FROM_TRADES = True   # paper: trades through the bid fill it too (False = only sellers on the book)
@@ -153,7 +153,8 @@ class MakerManager:
         now = view.get("ts") or self._now()
         secs_left = float(view["end_ts"]) - now
         w = self._win(view["start_ms"], view["end_ts"])
-        if L.maker_on(full) and secs_left <= float(mk.get("look_s", 60)):
+        maker_look = float(mk.get("look_s") or full.get("look_s") or 60)
+        if L.maker_on(full) and secs_left <= maker_look:
             w["seen"] = True
             for side in ("UP", "DOWN"):
                 p = view["p_up"] if side == "UP" else 1.0 - view["p_up"]
@@ -350,7 +351,9 @@ class MakerManager:
         if not (L.maker_on(full) and v and self.h.running() and now - float(v.get("ts") or 0) <= VIEW_MAX_AGE_S):
             return {}
         secs_left = float(v["end_ts"]) - now
-        if not (float(mk.get("cutoff_s", 3.0)) < secs_left <= float(mk.get("look_s", 60))):
+        maker_cutoff = float(mk.get("cutoff_s") or full.get("cutoff_s") or 3.0)
+        maker_look = float(mk.get("look_s") or full.get("look_s") or 60)
+        if not (maker_cutoff < secs_left <= maker_look):
             return {}
         start_ms = int(v["start_ms"])
         filled_sides = {b.side for b in self.bids.values() if b.start_ms == start_ms and b.filled > 1e-9}
@@ -442,9 +445,11 @@ class MakerManager:
         if b.start_ms != int(v["start_ms"]):
             return "window over"
         secs_left = float(v["end_ts"]) - now
-        if secs_left <= float(mk.get("cutoff_s", 3.0)):
+        maker_cutoff = float(mk.get("cutoff_s") or full.get("cutoff_s") or 3.0)
+        maker_look = float(mk.get("look_s") or full.get("look_s") or 60)
+        if secs_left <= maker_cutoff:
             return f"cutoff, {secs_left:.1f}s left"
-        if secs_left > float(mk.get("look_s", 60)):
+        if secs_left > maker_look:
             return "outside the look window"
         if self._win(b.start_ms)["fills"] >= int(mk.get("max_fills_per_window", 1)) and b.filled <= 1e-9:
             return "fill cap reached this window"

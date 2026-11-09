@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     CLOB_MAX_SLIPPAGE: float = 0.05  # marketable-limit buffer above the quote (probability units, 5¢)
     EXIT_MAX_RETRIES: int = 5
     FUNDER_ADDRESS: str = ""         # optional explicit deposit/funder wallet override (bypasses guessing)
+    ORDER_SIGNER: str = "auto"       # order signer mode: auto, wallet, or eoa
     CLOB_ALLOW_PARTIAL_FILL: bool = True  # Allow partial fill for thin books
     RELAYER_API_KEY: str = ""        # Polymarket relayer API key (sponsors gasless on-chain setup)
     ALCHEMY_API_KEY: str = ""        # optional: dedicated Polygon RPC for chain reads
@@ -144,6 +145,16 @@ def normalize_private_key(secret: str) -> str:
     return secret
 
 
+def normalize_order_signer(val: Any) -> Optional[str]:
+    """Validate order signer setting: auto, wallet, or eoa."""
+    if not val:
+        return "auto"
+    s = str(val).strip().lower()
+    if s in ("auto", "wallet", "eoa"):
+        return s
+    return None
+
+
 def load_settings():
     base_settings = Settings()
     try:
@@ -181,6 +192,7 @@ def load_settings():
                 if "max_slippage" in live: base_settings.CLOB_MAX_SLIPPAGE = float(live["max_slippage"])
                 if "exit_max_retries" in live: base_settings.EXIT_MAX_RETRIES = int(live["exit_max_retries"])
                 if "allow_partial_fill" in live: base_settings.CLOB_ALLOW_PARTIAL_FILL = bool(live["allow_partial_fill"])
+                if "order_signer" in live: base_settings.ORDER_SIGNER = normalize_order_signer(live["order_signer"]) or "auto"
 
             if "polymarket" in config_data:
                 poly = config_data["polymarket"]
@@ -195,7 +207,8 @@ def load_settings():
 
             if "trading" in config_data:
                 trading = config_data["trading"]
-                if "symbol" in trading: base_settings.SYMBOL = trading["symbol"]
+                raw_sym = str(trading.get("symbol") or "").strip().upper()
+                base_settings.SYMBOL = raw_sym if raw_sym else "BTCUSDT"
                 if "binance_base_url" in trading: base_settings.BINANCE_BASE_URL = trading["binance_base_url"]
                 if "candle_window_minutes" in trading: base_settings.CANDLE_WINDOW_MINUTES = trading["candle_window_minutes"]
                 if "poll_interval_ms" in trading: base_settings.POLL_INTERVAL_MS = trading["poll_interval_ms"]

@@ -736,7 +736,13 @@ class ClobTrader:
         rust_mod = _ensure_rust_clob()
         post_args = self._post_args(token_id, maker_amount, taker_amount, side_int, order_type_str, expiration_str, neg_risk,
                                     post_only)
-        res = rust_mod.post_order(*post_args)
+        try:
+            res = rust_mod.post_order(*post_args)
+        except TypeError:
+            try:
+                res = rust_mod.post_order(*post_args[:-1])
+            except TypeError:
+                res = rust_mod.post_order(*post_args[:-2])
         return self._finish_post(res, post_args, rust_mod)
 
     @staticmethod
@@ -783,7 +789,13 @@ class ClobTrader:
             first_line = f"HTTP {int(res.get('http_status') or 0)} - {detail_of(res)} [{self._order_context()}]"
             other = "eoa" if first_mode == "wallet" else "wallet"
             if self._set_rust_signer(rust_mod, other):
-                res = rust_mod.post_order(*post_args)
+                try:
+                    res = rust_mod.post_order(*post_args)
+                except TypeError:
+                    try:
+                        res = rust_mod.post_order(*post_args[:-1])
+                    except TypeError:
+                        res = rust_mod.post_order(*post_args[:-2])
                 if res.get("ok_http"):
                     self._signer_ok = ((self.get_eoa_address() or "").lower(), str(self.funder).lower(), other)
                     self._log(f"LIVE SIGNER: Polymarket refused order signer = {self._signer_label(first_mode)} "
@@ -901,7 +913,13 @@ class ClobTrader:
             post_args = self._post_args(token_id, maker_amt, taker_amt, side_int, otype,
                                         str(exp) if otype == "GTD" else "0", False,
                                         bool(post_only) and otype in ("GTC", "GTD"))
-            ticket = mod.post_order_async(*post_args)
+            try:
+                ticket = mod.post_order_async(*post_args)
+            except TypeError:
+                try:
+                    ticket = mod.post_order_async(*post_args[:-1])
+                except TypeError:
+                    ticket = mod.post_order_async(*post_args[:-2])
         except Exception as e:
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
         try:

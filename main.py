@@ -931,7 +931,18 @@ def _mk_book(token_id: str) -> Optional[Dict[str, Any]]:
 
 
 def _mk_balance(live: bool) -> float:
-    return float(state.get("live_balance") or 0.0) if live else float(state.get("paper_balance") or 0.0)
+    if not live:
+        return float(state.get("paper_balance") or 0.0)
+    bal = float(state.get("live_balance") or 0.0)
+    if bal <= 0 and settings.PRIVATE_KEY and clob_trader:
+        try:
+            b = clob_trader.get_usdc_balance()
+            if b is not None and b > 0:
+                bal = float(b)
+                state["live_balance"] = bal
+        except Exception:
+            pass
+    return bal
 
 
 def _mk_persist(ids: List[str]) -> None:
@@ -2246,7 +2257,9 @@ async def evaluate_longshot(reason: str = "event"):
             if secs_left < longshot.eval_cutoff_s(cfg) or secs_left > longshot.eval_look_s(cfg):
                 return
 
-            spot = binance_stream.get_last().get("price")
+            spot = (binance_stream.get_last().get("price")
+                    or state.get("last_spot_price")
+                    or (state.get("latest_data", {}).get("prices", {}) or {}).get("spot"))
             tgt = ctx.get("target_open")
             strike_open = ctx.get("strike_open")
             strike_src = ctx.get("strike_source") or "chainlink_ws"
@@ -2366,6 +2379,8 @@ async def seed_kline_buffers():
         return
     _seeding_klines = True
     try:
+        if not settings.SYMBOL or not str(settings.SYMBOL).strip():
+            settings.SYMBOL = "BTCUSDT"
         k1m, k5m = await asyncio.gather(
             data.fetch_klines(settings.SYMBOL, "1m", 240),
             data.fetch_klines(settings.SYMBOL, "5m", 200)
@@ -2902,7 +2917,8 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(update_loop()),
         asyncio.create_task(telegram_poller()),
         asyncio.create_task(entry_watcher()),
-        asyncio.create_task(order_conn_keeper())
+        asyncio.create_task(order_conn_keeper()),
+        asyncio.create_task(live_balance_updater())
     ]
 
 
@@ -3180,7 +3196,7 @@ async def get_settings():
             "relayer_api_key": mask(settings.RELAYER_API_KEY),
             "alchemy_api_key": mask(settings.ALCHEMY_API_KEY),
             "funder_address": settings.FUNDER_ADDRESS,
-            "order_signer": settings.ORDER_SIGNER,
+            "order_signer": getattr(settings, "ORDER_SIGNER", "auto") or "auto",
             "max_slippage": settings.CLOB_MAX_SLIPPAGE,
             "exit_max_retries": settings.EXIT_MAX_RETRIES,
             "allow_partial_fill": settings.CLOB_ALLOW_PARTIAL_FILL
@@ -3194,7 +3210,7 @@ async def get_settings():
             "down_label": settings.POLYMARKET_DOWN_LABEL
         },
         "trading": {
-            "symbol": settings.SYMBOL,
+            "symbol": settings.SYMBOL or "BTCUSDT",
             "risk_type": settings.RISK_TYPE,
             "risk_value": settings.RISK_VALUE
         },
@@ -3353,6 +3369,10 @@ async def post_settings(new_settings: Dict[str, Any]):
                     for k in ("enabled", "look_s", "min_prob", "min_multiple", "stake_type", "stake_value", "growth_cap_pct"):
                         b.pop(k, None)
 
+    if "trading" in merged_cfg and isinstance(merged_cfg["trading"], dict):
+        raw_sym = str(merged_cfg["trading"].get("symbol") or "").strip().upper()
+        merged_cfg["trading"]["symbol"] = raw_sym if raw_sym else (settings.SYMBOL or "BTCUSDT")
+
     with open(CONFIG_PATH, "w") as f:
         json.dump(merged_cfg, f, indent=2)
 
@@ -3371,7 +3391,8 @@ async def post_settings(new_settings: Dict[str, Any]):
 
     if "trading" in new_settings:
         t = new_settings["trading"]
-        settings.SYMBOL = t.get("symbol", settings.SYMBOL)
+        raw_sym = str(t.get("symbol") or "").strip().upper()
+        settings.SYMBOL = raw_sym if raw_sym else (settings.SYMBOL or "BTCUSDT")
         settings.RISK_TYPE = t.get("risk_type", settings.RISK_TYPE)
         settings.RISK_VALUE = float(t.get("risk_value", settings.RISK_VALUE))
 

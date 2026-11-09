@@ -113,64 +113,36 @@
                 <p class="text-[10px] text-gray-500 mt-3 italic">Flip exits an existing trade to open the opposite outcome if conviction flips before the cutoff.</p>
             </div>
 
-            <!-- Long shots (PATCH: longshot) -->
+            <!-- Long shots -->
             <div class="bg-gray-800 p-5 sm:p-6 rounded-lg shadow-lg">
-                <h2 class="text-lg sm:text-xl font-bold mb-4 border-b border-gray-700 pb-2">Long Shots (Final Minute)</h2>
-                <p class="text-xs text-gray-400 mb-4">Trades low-priced outcome shares in the final minute of the candle window using standard GTD limit orders. Sizing derives strictly from primary risk settings.</p>
-
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 mb-6">
+                <div class="flex items-center justify-between border-b border-gray-700 pb-2 mb-4">
                     <div>
-                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Stake sizing</label>
-                        <input type="text" value="Risk Value / Type (Primary Bot Settings)" readonly disabled class="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-gray-300 font-mono text-sm cursor-not-allowed">
-                        <p class="text-[10px] text-gray-500 mt-2 italic">Uses the primary bot risk value and risk type at all times.</p>
-                    </div>
-
-                    <div>
-                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Order execution</label>
-                        <input type="text" value="GTD (Good 'Til Date limit order)" readonly disabled class="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-gray-300 font-mono text-sm cursor-not-allowed">
-                        <p class="text-[10px] text-gray-500 mt-2 italic">Uses the same GTD limit order, retries, and slippage as the copier.</p>
-                    </div>
-
-                    <div>
-                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Max long shots per window</label>
-                        <input type="number" step="1" min="0" x-model.number="form.longshot.max_per_window" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
-                        <p class="text-[10px] text-gray-500 mt-2 italic">Maximum long-shot trades to enter per candle window.</p>
-                    </div>
-
-                    <div>
-                        <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Look window (seconds before close)</label>
-                        <input type="number" step="5" min="10" max="300" x-model.number="form.longshot.look_s" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
-                        <p class="text-[10px] text-gray-500 mt-2 italic">Final seconds of the candle window when long shots evaluate.</p>
+                        <h2 class="text-lg sm:text-xl font-bold">Long Shots</h2>
+                        <p class="text-xs text-gray-400 mt-0.5">Final-minute sniper and resting maker bids for high-multiple outcomes.</p>
                     </div>
                 </div>
 
-                <!-- 1¢–3¢ Asymmetric Sniper Band -->
-                <div class="mt-4 border border-gray-700 rounded-lg p-4 bg-gray-750">
-                    <span class="text-sm font-bold text-gray-200 uppercase tracking-wider block mb-3">1¢–3¢ Asymmetric Sniper Band</span>
-                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div class="space-y-4">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div>
-                            <label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Ask min ($)</label>
-                            <input type="number" step="0.001" min="0.001" max="1" x-model.number="form.longshot.bands.final.ask_min" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
+                            <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Final Minute Ask Range (Sniper)</label>
+                            <div class="grid grid-cols-2 gap-2">
+                                <input type="number" step="0.005" min="0.001" max="0.10" x-model.number="form.longshot.bands.final.ask_min" class="w-full bg-gray-700 border-none rounded-lg p-2.5 text-white" placeholder="Min (0.01)">
+                                <input type="number" step="0.005" min="0.001" max="0.10" x-model.number="form.longshot.bands.final.ask_max" class="w-full bg-gray-700 border-none rounded-lg p-2.5 text-white" placeholder="Max (0.03)">
+                            </div>
+                            <p class="text-[10px] text-gray-500 mt-2 italic">Triggers when market ask is within this sniper band (default 1¢–3¢).</p>
                         </div>
                         <div>
-                            <label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Ask max ($)</label>
-                            <input type="number" step="0.001" min="0.001" max="1" x-model.number="form.longshot.bands.final.ask_max" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
-                        </div>
-                        <div>
-                            <label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Max limit cap ($)</label>
-                            <input type="number" step="0.001" min="0.001" max="1" x-model.number="form.longshot.bands.final.max_price" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
+                            <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Sniper Max Price Cap</label>
+                            <input type="number" step="0.005" min="0.01" max="0.20" x-model.number="form.longshot.bands.final.max_price" class="w-full bg-gray-700 border-none rounded-lg p-2.5 text-white" placeholder="Cap (0.04)">
+                            <p class="text-[10px] text-gray-500 mt-2 italic">Absolute highest price to fill a longshot sniper trade.</p>
                         </div>
                     </div>
-                    <p class="text-[10px] text-gray-500 mt-2 italic">Triggers when an ask appears in the sniper range (default 1¢–3¢, capped at 4¢).</p>
-                </div>
 
-                <!-- Resting Maker Bids -->
-                <div class="mt-4 border border-gray-700 rounded-lg p-4 bg-gray-750">
-                    <span class="text-sm font-bold text-gray-200 uppercase tracking-wider block mb-3">Resting Maker Bids (0% Fee + Rebate)</span>
-                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-gray-700/60">
                         <div>
-                            <label class="block text-gray-400 text-[10px] mb-1 uppercase font-bold">Bid price ($)</label>
-                            <input type="number" step="0.001" min="0.001" max="0.5" x-model.number="form.longshot.maker.price" class="w-full bg-gray-700 border-none rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 transition">
+                            <label class="block text-gray-400 text-xs sm:text-sm mb-2 uppercase font-bold tracking-wider">Resting Maker Bid Price ($)</label>
+                            <input type="number" step="0.001" min="0.001" max="0.10" x-model.number="form.longshot.maker.price" class="w-full bg-gray-700 border-none rounded-lg p-2.5 text-white" placeholder="0.01">
                         </div>
                     </div>
                     <p class="text-[10px] text-gray-500 mt-2 italic">Places a resting GTD maker bid (default 1¢) in the final minute.</p>
@@ -379,7 +351,7 @@
                             Funds live as <strong>pUSD</strong> in a deposit wallet derived from your key; deposit
                             through Polymarket. There is no signature type or funder address to choose —
                             the bot checks the deposit, proxy and safe wallets and trades from whichever
-                            actually holds pUSD. Good 'Til Date (GTD) limit orders.
+                            actually holds pUSD. Good 'Til Cancelled (GTC) limit orders.
                         </p>
                     </div>
 
@@ -656,13 +628,12 @@
                     has_live_creds: false,
                     private_key: '',
                     polymarket: { series_id: '' },
-                    trading: { symbol: '', risk_type: 'percent', risk_value: 10 },
+                    trading: { symbol: 'BTCUSDT', risk_type: 'percent', risk_value: 10 },
                     ev: { ev_threshold: 0.04, min_prob: 0.55, min_book_liquidity_usd: 20.0 },
                     live: { relayer_api_key: '', alchemy_api_key: '', funder_address: '', max_slippage: 0.02 },
                     flip: { enabled: false, min_conviction: 0.80, min_minutes_left: 9.0 },
                     capital_extractor: { enabled: false, trigger_balance: 2000, withdraw_amount: 1000, withdraw_address: '', auto_resume_after_withdrawal: true, resume_after: 'submitted', default_destination: '' },
                     telegram: { enabled: false, bot_token: '' },
-                    // Longshot — defaults until /api/settings answers
                     longshot: {
                         max_per_window: 1,
                         look_s: 60,
@@ -718,11 +689,14 @@
                             fetch('/api/available-series').then(r => r.ok ? r.json() : [])
                         ]);
                         for (const k of ['polymarket', 'trading', 'ev', 'live', 'flip',
-                                         'capital_extractor', 'telegram',
-                                         'longshot', 'settlement']) {
+                                         'capital_extractor', 'telegram', 'longshot']) {
                             res[k] = Object.assign({}, this.form[k], res[k] || {});
                         }
                         this.form = res;
+                        if (!this.form.trading || !this.form.trading.symbol || !this.form.trading.symbol.trim()) {
+                            this.form.trading = this.form.trading || {};
+                            this.form.trading.symbol = 'BTCUSDT';
+                        }
                         this.availableSeries = sRes;
 
                         // Sanitize any invalid autofilled values like "admin"
@@ -783,6 +757,10 @@
                     setTimeout(() => this.tgResult = '', 10000);
                 },
                 async saveSettings() {
+                    if (!this.form.trading || !this.form.trading.symbol || !this.form.trading.symbol.trim()) {
+                        this.form.trading = this.form.trading || {};
+                        this.form.trading.symbol = 'BTCUSDT';
+                    }
                     // Sanitize invalid non-0x withdraw address before sending
                     let w = (this.form.capital_extractor?.withdraw_address || '').trim();
                     if (w && (!w.startsWith('0x') || w.length !== 42)) {
