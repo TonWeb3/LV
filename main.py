@@ -514,7 +514,7 @@ polymarket_ws_stream = ws_data.PolymarketChainlinkStream(
     symbol_includes=get_ws_symbol_filter(settings.SYMBOL),
     on_update=_on_poly_chainlink_tick
 )
-polymarket_clob_ws = ws_data.PolymarketClobMarketStream(on_update=lambda: _on_book_update())  # PATCH: longshot
+polymarket_clob_ws = ws_data.PolymarketClobMarketStream(on_update=lambda data=None: _on_book_update())  # PATCH: longshot (ws_data passes the message; the wake doesn't need it)
 chainlink_ws_stream = ws_data.ChainlinkPriceStream(aggregator=settings.get_aggregator(settings.SYMBOL), on_update=_on_chainlink_tick)
 
 def get_candle_window_timing(window_minutes: int) -> Dict[str, float]:
@@ -621,7 +621,7 @@ async def _discover_market(target_start_ms: float, strict: bool = False) -> Opti
                 end_m_ts = datetime.fromisoformat(end_str.replace('Z', '+00:00')).timestamp() * 1000
             except Exception:
                 continue
-            if end_m_ts <= now_ms + 15_000:
+            if end_m_ts <= now_ms + 2_000:
                 continue
             esr = m.get("eventStartTime") or m.get("gameStartTime")
             start_m_ts = None
@@ -660,7 +660,7 @@ async def get_active_market(force: bool = False) -> Optional[Dict[str, Any]]:
         if end_date:
             try:
                 end_ts = datetime.fromisoformat(end_date.replace('Z', '+00:00')).timestamp()
-                if end_ts > now + 15 and (now - _cached_market_ts) < 30.0:
+                if end_ts > now + 2 and (now - _cached_market_ts) < 30.0:
                     return _cached_market
             except Exception:
                 pass
@@ -1008,6 +1008,7 @@ async def _mk_on_fill(bid: "ls_maker.Bid", shares: float, usd: float, via: str) 
             t["live_order_ids"] = [bid.order_id]
         bid.trade = t
         state["active_trades"].append(t)
+        _ls_entered_windows.add(int(bid.start_ms))
     t["paper_shares"] = float(t.get("paper_shares") or 0.0) + shares
     t["paper_amount"] = float(t.get("paper_amount") or 0.0) + usd
     state["paper_balance"] = float(state.get("paper_balance") or 0.0) - usd
@@ -1034,6 +1035,7 @@ ls_maker_mgr = ls_maker.MakerManager(SimpleNamespace(
     place=_mk_place, cancel=_mk_cancel, get_order=_mk_get_order, book=_mk_book,
     trades_since=lambda tok, ts: polymarket_clob_ws.recent_trades(tok, ts) if tok else [],
     balance=_mk_balance, on_fill=_mk_on_fill, log=log_message, persist=_mk_persist,
+    has_longshot=lambda start_ms: any(_is_longshot(t) and t.get("window_start_ms") == int(start_ms) for t in state["active_trades"]),
     orphans=lambda: list(state.get("ls_maker_open") or []) if settings.PRIVATE_KEY else []))
 
 
@@ -1365,7 +1367,7 @@ async def execute_trade(decision: Dict[str, Any], market_prices: Dict[str, Any],
             # PATCH: longshot — up to longshot.max_per_window long shots per window;
             # the regular trade (if any) doesn't count.
             # (PATCH: longshot maker — maker fills have their own cap, maker.max_fills_per_window)
-            n_ls = sum(1 for t in state["active_trades"] if _is_longshot(t) and not _is_ls_maker(t) and _same_window(t))
+            n_ls = sum(1 for t in state["active_trades"] if _is_longshot(t) and _same_window(t))
             if n_ls >= int(ls_cfg.get("max_per_window", 1)):
                 return "slot_busy"
         else:
@@ -1687,17 +1689,16 @@ def mark_window_open(start_ms: int, window_ms: int, current_price: Optional[floa
 
 async def _redeem_win(trade: Dict[str, Any], market: Optional[Dict[str, Any]],
                       up_index: int, down_index: int, winning_index: int):
-    condition_id = (market or {}).get("conditionId") or (market or {}).get("condition_id")
+    condition_id = (market or {}).get("conditionId") or (market or {}).get("condition_id") or trade.get("condition_id")
     if not condition_id:
         trade["redeem"] = {"ok": False, "error": "missing_condition_id"}
         log_message(f"REDEEM skipped for {trade['market_slug']}: no conditionId on the market")
         return
 
-    # Defer on-chain redemption if market was settled via local strike fallback and on-chain outcome is still pending
-    if trade.get("resolution") == "close_vs_open":
-        trade["redeem_status"] = "PENDING_ONCHAIN_RESOLUTION"
-        log_message(f"REDEEM deferred for {trade['market_slug']}: Position won via local fallback; waiting for on-chain Polymarket resolution before redeeming.")
-        return
+    trade["condition_id"] = condition_id
+    trade["winning_index"] = winning_index
+    trade["up_index"] = up_index
+    trade["down_index"] = down_index
 
     amounts = [0.0, 0.0]
     idx = up_index if winning_index == up_index else down_index
@@ -1707,7 +1708,16 @@ async def _redeem_win(trade: Dict[str, Any], market: Optional[Dict[str, Any]],
     if 0 <= idx < len(amounts):
         amounts[idx] = shares
 
-    neg_risk = bool((market or {}).get("negRisk") or (market or {}).get("neg_risk") or False)
+    neg_risk = bool((market or {}).get("negRisk") or (market or {}).get("neg_risk") or trade.get("neg_risk") or False)
+    trade["redeem_amounts"] = amounts
+    trade["neg_risk"] = neg_risk
+
+    # Defer on-chain redemption if market was settled via local strike fallback and on-chain outcome is still pending
+    if trade.get("resolution") == "close_vs_open":
+        trade["redeem_status"] = "PENDING_ONCHAIN_RESOLUTION"
+        log_message(f"REDEEM deferred for {trade['market_slug']}: Position won via local fallback; waiting for on-chain Polymarket resolution before redeeming.")
+        return
+
     try:
         res = await asyncio.to_thread(clob_trader.redeem, condition_id, amounts, neg_risk)
     except Exception as e:
@@ -1723,8 +1733,8 @@ async def _redeem_win(trade: Dict[str, Any], market: Optional[Dict[str, Any]],
             trade["redeem_status"] = "PENDING_RELAYER_KEY"
             log_message(f"REDEEM PENDING for {trade['market_slug']}: 401 Unauthorized — Polymarket Relayer API Key is required for gasless redemption. Add your API key in config.json -> relayer -> api_key, or claim on polymarket.com.")
         else:
-            trade["redeem_status"] = "FAILED"
-            log_message(f"REDEEM FAILED for {trade['market_slug']}: {err}")
+            trade["redeem_status"] = "PENDING_ONCHAIN_RESOLUTION"
+            log_message(f"REDEEM deferred for {trade['market_slug']}: on-chain resolution pending ({err}), will retry automatically.")
 
 def _archive(trade: Dict[str, Any]) -> Dict[str, Any]:
     for k in ("_market", "_market_closed", "order_response"):
@@ -2300,6 +2310,8 @@ async def evaluate_longshot(reason: str = "event"):
             state["ls_last"]["exec"] = res
             if res == "entered":
                 _ls_entered_windows.add(int(ctx["start_ms"]))
+                if longshot.maker_on(cfg):
+                    await ls_maker_mgr.cancel_all("taker longshot entered")
                 await broadcast_state()
         except Exception as e:
             if now - _ls_last_error_ts > 60:
@@ -2343,6 +2355,33 @@ async def entry_watcher():
             await asyncio.sleep(0.1)
 
 
+_last_redeem_retry_ts = 0.0
+async def retry_pending_redeems():
+    global _last_redeem_retry_ts
+    now = time.time()
+    if now - _last_redeem_retry_ts < 20.0 or not settings.PRIVATE_KEY:
+        return
+    _last_redeem_retry_ts = now
+    pending = [t for t in state.get("trade_history", [])
+               if t.get("live_status") == "FILLED"
+               and t.get("redeem_status") in ("PENDING_ONCHAIN_RESOLUTION", "PENDING_RELAYER_KEY")
+               and t.get("condition_id") and t.get("redeem_amounts")]
+    for t in pending:
+        cid = t.get("condition_id")
+        amts = t.get("redeem_amounts")
+        neg = bool(t.get("neg_risk"))
+        try:
+            res = await asyncio.to_thread(clob_trader.redeem, cid, amts, neg)
+            if res.get("ok"):
+                t["redeem_status"] = "CONFIRMED"
+                t["redeem"] = res
+                idx = 0 if amts[0] > 0 else 1
+                log_message(f"REDEEM ok for {t['market_slug']}: {amts[idx]:.2f} live shares (tx {res.get('tx')})")
+                asyncio.create_task(asyncio.to_thread(save_state))
+        except Exception:
+            pass
+
+
 async def live_balance_updater():
     """Background task to continuously poll the CLOB USDC balance (every 2.5s)
     so the bot always has the live balance in RAM, and precomputes the next
@@ -2368,6 +2407,8 @@ async def live_balance_updater():
                         stake = 0.0
 
                     state["precomputed_live_stake"] = round(stake, 2)
+
+                await retry_pending_redeems()
         except Exception:
             pass
         await asyncio.sleep(2.5)
@@ -3363,10 +3404,9 @@ async def post_settings(new_settings: Dict[str, Any]):
                       "stake_type", "stake_value", "growth_cap_pct"):
                 merged_cfg["longshot"]["maker"].pop(k, None)
         if "bands" in merged_cfg["longshot"] and isinstance(merged_cfg["longshot"]["bands"], dict):
-            merged_cfg["longshot"]["bands"].pop("favored", None)
             for b in merged_cfg["longshot"]["bands"].values():
                 if isinstance(b, dict):
-                    for k in ("enabled", "look_s", "min_prob", "min_multiple", "stake_type", "stake_value", "growth_cap_pct"):
+                    for k in ("stake_type", "stake_value", "growth_cap_pct", "enabled", "look_s"):
                         b.pop(k, None)
 
     if "trading" in merged_cfg and isinstance(merged_cfg["trading"], dict):

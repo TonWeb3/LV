@@ -356,8 +356,10 @@ class MakerManager:
         if not (maker_cutoff < secs_left <= maker_look):
             return {}
         start_ms = int(v["start_ms"])
+        has_ls = getattr(self.h, "has_longshot", None)
+        has_active_ls = has_ls(start_ms) if has_ls else False
         filled_sides = {b.side for b in self.bids.values() if b.start_ms == start_ms and b.filled > 1e-9}
-        cap_hit = self._win(start_ms)["fills"] >= int(mk.get("max_fills_per_window", 1))
+        cap_hit = (self._win(start_ms)["fills"] >= int(mk.get("max_fills_per_window", 1))) or has_active_ls
         min_p = float(mk.get("min_prob", 0.2))
         max_ask = float(mk.get("max_ask", 1.0))
         out = {}
@@ -451,6 +453,9 @@ class MakerManager:
             return f"cutoff, {secs_left:.1f}s left"
         if secs_left > maker_look:
             return "outside the look window"
+        has_ls = getattr(self.h, "has_longshot", None)
+        if has_ls and has_ls(b.start_ms):
+            return "longshot already entered"
         if self._win(b.start_ms)["fills"] >= int(mk.get("max_fills_per_window", 1)) and b.filled <= 1e-9:
             return "fill cap reached this window"
         if b.last_prob < float(mk.get("min_prob", 0.2)) - KEEP_MARGIN:

@@ -34,15 +34,30 @@ DEFAULTS: Dict[str, Any] = {
         "price": 0.01,         # resting maker bid price (1¢)
     },
     "bands": {
+        "favored": {
+            "ask_min": 0.07,
+            "ask_max": 0.10,
+            "max_price": 0.15,
+            "min_prob": 0.55,
+            "min_multiple": 0.0,
+        },
         "final": {
             "ask_min": 0.01,
             "ask_max": 0.03,
             "max_price": 0.04,
+            "min_prob": 0.0,
+            "min_multiple": 10.0,
         },
     },
 }
 
-BAND_TEMPLATE = {"ask_min": 0.01, "ask_max": 0.03, "max_price": 0.04}
+BAND_TEMPLATE = {
+    "ask_min": 0.01,
+    "ask_max": 0.03,
+    "max_price": 0.04,
+    "min_prob": 0.0,
+    "min_multiple": 0.0,
+}
 
 MAKER_DEFAULTS = DEFAULTS["maker"]
 
@@ -113,6 +128,8 @@ def normalize(user_cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
                 if "ask_min" in b: num(b, "ask_min", f"{name}.ask_min", 0, 1)
                 if "ask_max" in b: num(b, "ask_max", f"{name}.ask_max", 0, 1)
                 if "max_price" in b: num(b, "max_price", f"{name}.max_price", 0, 1)
+                if "min_prob" in b: num(b, "min_prob", f"{name}.min_prob", 0, 1)
+                if "min_multiple" in b: num(b, "min_multiple", f"{name}.min_multiple", 0, 1000)
                 if "ask_min" in b and "ask_max" in b and float(b["ask_min"]) > float(b["ask_max"]):
                     errs.append(f"{name}: ask_min is above ask_max")
 
@@ -123,14 +140,20 @@ def normalize(user_cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 def describe(cfg: Dict[str, Any]) -> str:
     """One log line with the active settings."""
-    parts = []
-    for name, b in (cfg.get("bands") or {}).items():
-        if b.get("enabled", True):
-            parts.append(f"{name} {float(b.get('ask_min', 0.01))*100:g}–{float(b.get('ask_max', 0.03))*100:g}¢ (cap {float(b.get('max_price', 0.04))*100:g}¢)")
     mk = cfg.get("maker") or {}
-    maker_str = f" | maker {float(mk.get('price', 0.01))*100:g}¢ bid" if maker_on(cfg) else ""
-    return (f"stake {stake_text()}, GTD, max {cfg.get('max_per_window', 1)}/window, last {cfg.get('look_s', 60)}s | "
-            + ("; ".join(parts) or "no bands") + maker_str)
+    maker_str = f"maker {float(mk.get('price', 0.01))*100:g}¢ bid"
+    band_parts = []
+    for name, b in (cfg.get("bands") or {}).items():
+        if not b.get("enabled", True):
+            continue
+        p_str = f", prob>={float(b['min_prob'])*100:g}%" if float(b.get("min_prob") or 0) > 0 else ""
+        m_str = f", ×{float(b['min_multiple']):g}" if float(b.get("min_multiple") or 0) > 0 else ""
+        band_parts.append(f"{name} {float(b.get('ask_min', 0))*100:g}–{float(b.get('ask_max', 0))*100:g}¢ (cap {float(b.get('max_price', 0))*100:g}¢{p_str}{m_str})")
+    bands_str = " | ".join(band_parts)
+    prefix = f"stake {stake_text()}, GTD, max {cfg.get('max_per_window', 1)}/window, last {cfg.get('look_s', 60)}s"
+    if bands_str:
+        return f"{prefix} | {bands_str} | {maker_str}"
+    return f"{prefix} | {maker_str}"
 
 
 def max_look_s(cfg: Dict[str, Any]) -> float:
@@ -308,7 +331,7 @@ def prob_up_exact(spot: float, strike: float, secs_left: float,
 # ── Decision ──────────────────────────────────────────────────────────────────
 def decide(p_up: float, books: Dict[str, Dict[str, Optional[float]]], secs_left: float,
            cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Pick at most one long-shot trade candidate (side, band) based on ask range."""
+    """Pick at most one long-shot trade candidate (side, band) based on ask range and probability/multiple filters."""
     cutoff = float(cfg.get("cutoff_s", 3.0))
     if secs_left < cutoff:
         return {"action": "NO_TRADE", "reason": "longshot_past_cutoff"}
@@ -328,14 +351,36 @@ def decide(p_up: float, books: Dict[str, Dict[str, Optional[float]]], secs_left:
             ask_min = float(band.get("ask_min", 0.01))
             ask_max = float(band.get("ask_max", 0.03))
             max_price = float(band.get("max_price", ask_max))
-            if not (ask_min <= ask <= ask_max):
+            if not (ask_min - 1e-9 <= ask <= ask_max + 1e-9):
                 continue
-            if ask > max_price:
+            if ask > max_price + 1e-9:
                 continue
             mult = p / ask if ask > 0 else 0.0
-            cand = {"action": "ENTER", "side": side, "band": name, "prob": p, "price": ask,
-                    "multiple": mult, "max_price": max_price,
-                    "phase": "LONGSHOT", "strength": "LONGSHOT", "reason": f"longshot_{name}"}
+
+            # 1) Gating: min_multiple (e.g. 10x for final band: chance >= 10 * ask)
+            min_mult = float(band.get("min_multiple") or 0.0)
+            if min_mult > 0 and mult < min_mult - 1e-9:
+                reasons.append(f"{side}_{name}_mult_{mult:.1f}<{min_mult:g}")
+                continue
+
+            # 2) Gating: min_prob (e.g. 0.55 for favored band: chance >= 55%)
+            min_p = float(band.get("min_prob") or 0.0)
+            if min_p > 0 and p < min_p - 1e-9:
+                reasons.append(f"{side}_{name}_prob_{p:.3f}<{min_p:.2f}")
+                continue
+
+            cand = {
+                "action": "ENTER",
+                "side": side,
+                "band": name,
+                "prob": p,
+                "price": ask,
+                "multiple": mult,
+                "max_price": max_price,
+                "phase": "LONGSHOT",
+                "strength": "LONGSHOT",
+                "reason": f"longshot_{name}",
+            }
             if best is None or cand["multiple"] > best["multiple"]:
                 best = cand
     if best:
@@ -488,20 +533,17 @@ def on_price_grid(px: float) -> bool:
 
 
 def maker_bid_price(cap: float, ask: Optional[float]) -> Optional[float]:
-    """Where a maker bid rests: at `cap`, or one tick under the ask when the ask is at or under
-    `cap` (a post-only bid at or above the ask would be refused, it would take the ask).
-    Sub-cent prices need the 0.1¢ tick, which the book only uses while prices are under 4¢:
-    with the ask at 4¢ or more (or no ask) a sub-cent price is rounded down to whole cents.
-    None = no bid (nothing left above zero)."""
-    cap = float(cap)
-    px = cap
-    if ask is not None and ask > 0 and float(ask) <= cap + 1e-9:
-        px = float(ask) - tick_for(float(ask))
-    fine = ask is not None and 0 < float(ask) < 0.04
-    if not fine:
-        px = math.floor(px * 100.0 + 1e-6) / 100.0
-    px = math.floor(px * 1000.0 + 1e-6) / 1000.0
-    return round(px, 3) if px >= 0.001 - 1e-9 else None
+    """Where a maker bid rests: at `cap` (default 1¢ = 0.01).
+    If the ask is at or under `cap` (<= 0.01), placing a bid at 0.01 would take the ask
+    (crossing the spread) and violate post-only, and bidding under 0.01 breaks Polymarket's
+    0.01 minimum tick size rule. So no bid rests when ask <= cap.
+    """
+    cap = round(float(cap), 2)
+    if cap <= 0:
+        return None
+    if ask is not None and float(ask) <= cap + 1e-9:
+        return None
+    return cap
 
 
 def maker_shares(usd: float, px: float, max_usd: Optional[float] = None) -> float:
